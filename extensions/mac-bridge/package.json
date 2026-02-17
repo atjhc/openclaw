@@ -1,0 +1,17 @@
+{
+  "name": "@openclaw/mac-bridge",
+  "version": "2026.2.3",
+  "description": "Generic scripting bridge plugin — exposes any local JXA/AppleScript bridge as OpenClaw tools",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
