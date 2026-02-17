@@ -423,6 +423,16 @@ importers:
         specifier: 0.34.48
         version: 0.34.48
 
+  extensions/mac-bridge:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/matrix:
     dependencies:
       '@matrix-org/matrix-sdk-crypto-nodejs':
