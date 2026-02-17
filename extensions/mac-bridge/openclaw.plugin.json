@@ -1,0 +1,27 @@
+{
+  "id": "mac-bridge",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["bridges"],
+    "properties": {
+      "bridges": {
+        "type": "array",
+        "description": "List of scripting bridges to expose as tools",
+        "items": {
+          "type": "object",
+          "required": ["name", "url"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Short identifier used to address this bridge"
+            },
+            "url": { "type": "string", "description": "Base URL of the bridge server" },
+            "description": { "type": "string", "description": "What app this bridge controls" }
+          }
+        }
+      }
+    }
+  }
+}
