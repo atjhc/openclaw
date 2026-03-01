@@ -2,27 +2,22 @@ import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
 import { BridgeClient } from "./client.js";
 
-type BridgeConfig = {
-  name: string;
-  url: string;
-  description?: string;
-};
-
 type PluginConfig = {
-  bridges?: BridgeConfig[];
+  url?: string;
 };
 
 export function createScriptingBridgeTool(api: OpenClawPluginApi) {
   const cfg = (api.pluginConfig ?? {}) as PluginConfig;
-  const bridges = cfg.bridges ?? [];
-  const clients = new Map(bridges.map((b) => [b.name, new BridgeClient(b.url)]));
+  const url = cfg.url;
+  if (!url) {
+    throw new Error("mac-bridge plugin requires a url in its config");
+  }
 
-  const bridgeNames = bridges.map((b) => b.name).join(", ") || "(none configured)";
+  const client = new BridgeClient(url);
 
   return {
     name: "scripting_bridge",
-    description: `Call local scripting bridges that expose Mac app state via HTTP.
-Configured bridges: ${bridgeNames}.
+    description: `Call the MacBridge server to interact with macOS apps (Calendar, Contacts, Mail, Things, Notes, NetNewsWire, Reminders, Messages, Shortcuts).
 Workflow: call list_bridges to see what's available, then schema to discover endpoints, then call to invoke them.`,
 
     parameters: Type.Object(
@@ -31,14 +26,15 @@ Workflow: call list_bridges to see what's available, then schema to discover end
           type: "string",
           enum: ["list_bridges", "schema", "call"],
           description: [
-            "list_bridges – list all configured bridges with their names and descriptions",
+            "list_bridges – list all available bridges with their status",
             "schema – fetch the endpoint schema for a bridge (use before calling for the first time)",
             "call – invoke an endpoint on a bridge",
           ].join("; "),
         }),
         bridge: Type.Optional(
           Type.String({
-            description: `Bridge name to target. Required for schema and call. One of: ${bridgeNames}`,
+            description:
+              "Bridge prefix to target (e.g. calendar, contacts, mail, things, notes, nnw, reminders, messages, shortcuts). Required for schema and call.",
           }),
         ),
         method: Type.Optional(
@@ -50,7 +46,7 @@ Workflow: call list_bridges to see what's available, then schema to discover end
         ),
         path: Type.Optional(
           Type.String({
-            description: 'Endpoint path, e.g. "/articles". Required for call.',
+            description: 'Endpoint path within the bridge, e.g. "/calendars", "/todos". Required for call.',
           }),
         ),
         query: Type.Optional(
@@ -74,32 +70,23 @@ Workflow: call list_bridges to see what's available, then schema to discover end
       try {
         switch (action) {
           case "list_bridges": {
-            return result(
-              bridges.map((b) => ({
-                name: b.name,
-                url: b.url,
-                description: b.description ?? null,
-              })),
-            );
+            return result(await client.listBridges());
           }
 
           case "schema": {
-            const client = resolveClient(params.bridge, clients);
-            return result(await client.schema());
+            const bridge = requireString(params.bridge, "bridge");
+            return result(await client.schema(bridge));
           }
 
           case "call": {
-            const client = resolveClient(params.bridge, clients);
+            const bridge = requireString(params.bridge, "bridge");
+            const path = requireString(params.path, "path");
             const method = params.method as string | undefined;
-            const path = params.path as string | undefined;
-            if (!path) {
-              throw new Error("path is required for call");
-            }
             if (method === "POST") {
-              return result(await client.post(path, params.body));
+              return result(await client.post(bridge, path, params.body));
             }
             const query = toPrimitiveRecord(params.query);
-            return result(await client.get(path, query));
+            return result(await client.get(bridge, path, query));
           }
 
           default:
@@ -126,17 +113,11 @@ function toPrimitiveRecord(value: unknown): Record<string, string | number | boo
   return out;
 }
 
-function resolveClient(bridgeName: unknown, clients: Map<string, BridgeClient>): BridgeClient {
-  if (typeof bridgeName !== "string" || !bridgeName) {
-    throw new Error("bridge name is required");
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value) {
+    throw new Error(`${name} is required`);
   }
-  const client = clients.get(bridgeName);
-  if (!client) {
-    throw new Error(
-      `Unknown bridge: "${bridgeName}". Available: ${[...clients.keys()].join(", ")}`,
-    );
-  }
-  return client;
+  return value;
 }
 
 function result(data: unknown) {
