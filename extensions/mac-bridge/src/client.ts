@@ -18,6 +18,13 @@ export type BridgeSchema = {
   endpoints: EndpointSchema[];
 };
 
+export type BridgeInfo = {
+  name: string;
+  prefix: string;
+  status: string;
+  help: string;
+};
+
 type BridgeResponse<T> = { ok: true; result: T } | { ok: false; error: string };
 
 export class BridgeClient {
@@ -36,12 +43,11 @@ export class BridgeClient {
         url.searchParams.set(k, String(v));
       }
     }
-    const init: RequestInit = {
-      method,
-      signal: AbortSignal.timeout(30_000),
-    };
+    // Request JSON so FormatMiddleware doesn't convert to markdown
+    const headers: Record<string, string> = { Accept: "application/json" };
+    const init: RequestInit = { method, headers, signal: AbortSignal.timeout(30_000) };
     if (opts.body !== undefined) {
-      init.headers = { "Content-Type": "application/json" };
+      headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(opts.body);
     }
     const res = await fetch(url.toString(), init);
@@ -52,15 +58,19 @@ export class BridgeClient {
     return data.result;
   }
 
-  schema(): Promise<BridgeSchema> {
-    return this.request("GET", "/schema");
+  listBridges(): Promise<BridgeInfo[]> {
+    return this.request("GET", "/");
   }
 
-  get(path: string, query?: Record<string, string | number | boolean>): Promise<unknown> {
-    return this.request("GET", path, { query });
+  schema(bridge: string): Promise<BridgeSchema> {
+    return this.request("GET", `/${bridge}/schema`);
   }
 
-  post(path: string, body?: unknown): Promise<unknown> {
-    return this.request("POST", path, { body });
+  get(bridge: string, path: string, query?: Record<string, string | number | boolean>): Promise<unknown> {
+    return this.request("GET", `/${bridge}${path}`, { query });
+  }
+
+  post(bridge: string, path: string, body?: unknown): Promise<unknown> {
+    return this.request("POST", `/${bridge}${path}`, { body });
   }
 }
