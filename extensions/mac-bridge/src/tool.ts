@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
-import { BridgeClient } from "./client.js";
+import { BridgeClient, BridgeError } from "./client.js";
 
 type PluginConfig = {
   url?: string;
@@ -16,7 +16,7 @@ export function createScriptingBridgeTool(api: OpenClawPluginApi) {
   const client = new BridgeClient(url);
 
   return {
-    name: "scripting_bridge",
+    name: "mac_bridge",
     description: `Call the MacBridge server to interact with macOS apps (Calendar, Contacts, Mail, Things, Notes, NetNewsWire, Reminders, Messages, Shortcuts).
 Workflow: call list_bridges to see what's available, then schema to discover endpoints, then call to invoke them.`,
 
@@ -46,7 +46,8 @@ Workflow: call list_bridges to see what's available, then schema to discover end
         ),
         path: Type.Optional(
           Type.String({
-            description: 'Endpoint path within the bridge, e.g. "/calendars", "/todos". Required for call.',
+            description:
+              'Endpoint path within the bridge, e.g. "/calendars", "/todos". Required for call.',
           }),
         ),
         query: Type.Optional(
@@ -93,6 +94,9 @@ Workflow: call list_bridges to see what's available, then schema to discover end
             throw new Error(`Unknown action: ${action}`);
         }
       } catch (e) {
+        if (e instanceof BridgeError) {
+          return result(e.data);
+        }
         const message = e instanceof Error ? e.message : String(e);
         return result({ error: message });
       }
