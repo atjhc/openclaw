@@ -1,4 +1,6 @@
-import { rmSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { copyFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import path from "node:path";
 import { completeSimple, type TextContent } from "@mariozechner/pi-ai";
 import { EdgeTTS } from "node-edge-tts";
 import { getApiKeyForModel, requireApiKey } from "../agents/model-auth.js";
@@ -11,6 +13,7 @@ import {
 import { resolveModelAsync } from "../agents/pi-embedded-runner/model.js";
 import { prepareModelForSimpleCompletion } from "../agents/simple-completion-transport.js";
 import type { OpenClawConfig } from "../config/config.js";
+import { resolveStateDir } from "../config/paths.js";
 import type {
   ResolvedTtsConfig,
   ResolvedTtsModelOverrides,
@@ -335,6 +338,9 @@ export function parseTtsDirectives(
     return "";
   });
 
+  // Strip any remaining TTS closing tags the model may have emitted (e.g. [[/tts:neutral]])
+  cleanedText = cleanedText.replace(/\[\[\/?tts(?::[^\]]*?)?\]\]/gi, "");
+
   return {
     cleanedText,
     ttsText: overrides.ttsText,
@@ -525,10 +531,27 @@ export async function summarizeText(params: {
   }
 }
 
+function archiveTtsAudio(tempDir: string): void {
+  try {
+    const archiveDir = path.join(resolveStateDir(), "tts-archive");
+    mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    const files = readdirSync(tempDir);
+    for (const file of files) {
+      const ext = path.extname(file);
+      const id = randomBytes(4).toString("hex");
+      const dest = path.join(archiveDir, `${id}${ext}`);
+      copyFileSync(path.join(tempDir, file), dest);
+    }
+  } catch {
+    // best-effort; don't break TTS if archive fails
+  }
+}
+
 export function scheduleCleanup(
   tempDir: string,
   delayMs: number = TEMP_FILE_CLEANUP_DELAY_MS,
 ): void {
+  archiveTtsAudio(tempDir);
   const timer = setTimeout(() => {
     try {
       rmSync(tempDir, { recursive: true, force: true });
