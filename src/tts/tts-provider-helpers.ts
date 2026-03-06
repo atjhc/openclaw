@@ -1,4 +1,7 @@
-import { rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { copyFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import path from "node:path";
+import { resolveStateDir } from "../config/paths.js";
 import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 
 const TEMP_FILE_CLEANUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
@@ -42,10 +45,27 @@ export function normalizeSeed(seed?: number): number | undefined {
   return next;
 }
 
+function archiveTtsAudio(tempDir: string): void {
+  try {
+    const archiveDir = path.join(resolveStateDir(), "tts-archive");
+    mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    const files = readdirSync(tempDir);
+    for (const file of files) {
+      const ext = path.extname(file);
+      const id = randomBytes(4).toString("hex");
+      const dest = path.join(archiveDir, `${id}${ext}`);
+      copyFileSync(path.join(tempDir, file), dest);
+    }
+  } catch {
+    // best-effort; don't break TTS if archive fails
+  }
+}
+
 export function scheduleCleanup(
   tempDir: string,
   delayMs: number = TEMP_FILE_CLEANUP_DELAY_MS,
 ): void {
+  archiveTtsAudio(tempDir);
   const timer = setTimeout(() => {
     try {
       rmSync(tempDir, { recursive: true, force: true });
