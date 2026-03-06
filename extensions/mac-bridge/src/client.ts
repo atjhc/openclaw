@@ -27,6 +27,14 @@ export type BridgeInfo = {
 
 type BridgeResponse<T> = { ok: true; result: T } | { ok: false; error: string };
 
+export class BridgeError extends Error {
+  readonly data: Record<string, unknown>;
+  constructor(message: string, data: Record<string, unknown>) {
+    super(message);
+    this.data = data;
+  }
+}
+
 export class BridgeClient {
   constructor(private baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -51,11 +59,16 @@ export class BridgeClient {
       init.body = JSON.stringify(opts.body);
     }
     const res = await fetch(url.toString(), init);
-    const data = (await res.json()) as BridgeResponse<T>;
-    if (!data.ok) {
-      throw new Error(data.error);
+    const data = await res.json();
+    if (!res.ok) {
+      const message = typeof data?.reason === "string" ? data.reason : `HTTP ${res.status}`;
+      throw new BridgeError(message, data as Record<string, unknown>);
     }
-    return data.result;
+    const envelope = data as BridgeResponse<T>;
+    if (!envelope.ok) {
+      throw new BridgeError(envelope.error, data as Record<string, unknown>);
+    }
+    return envelope.result;
   }
 
   listBridges(): Promise<BridgeInfo[]> {
@@ -66,11 +79,22 @@ export class BridgeClient {
     return this.request("GET", `/${bridge}/schema`);
   }
 
-  get(bridge: string, path: string, query?: Record<string, string | number | boolean>): Promise<unknown> {
-    return this.request("GET", `/${bridge}${path}`, { query });
+  get(
+    bridge: string,
+    path: string,
+    query?: Record<string, string | number | boolean>,
+  ): Promise<unknown> {
+    return this.request("GET", this.resolvePath(bridge, path), { query });
   }
 
   post(bridge: string, path: string, body?: unknown): Promise<unknown> {
-    return this.request("POST", `/${bridge}${path}`, { body });
+    return this.request("POST", this.resolvePath(bridge, path), { body });
+  }
+
+  // Schema paths include the bridge prefix (e.g. "/mail/accounts");
+  // avoid doubling it when the agent passes the full schema path.
+  private resolvePath(bridge: string, path: string): string {
+    const prefix = `/${bridge}`;
+    return path.startsWith(prefix) ? path : `${prefix}${path}`;
   }
 }
