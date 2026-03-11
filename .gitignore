@@ -92,7 +92,7 @@ docs/internal/
 tmp/
 IDENTITY.md
 USER.md
-.tgz
+*.tgz
 .idea
 
 # local tooling
