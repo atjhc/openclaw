@@ -960,6 +960,16 @@ export async function runHeartbeatOnce(opts: {
       typeof heartbeat?.timeoutSeconds === "number" ? heartbeat.timeoutSeconds : undefined;
     const bootstrapContextMode: "lightweight" | undefined =
       heartbeat?.lightContext === true ? "lightweight" : undefined;
+    const getReplyFromConfig =
+      opts.deps?.getReplyFromConfig ?? (await loadHeartbeatRunnerRuntime()).getReplyFromConfig;
+    // Capture tool result media (e.g. TTS audio) during the agent run so it
+    // can be delivered even when the assistant responds with a silent token.
+    const toolResultMedia: ReplyPayload[] = [];
+    const onToolResult = (payload: ReplyPayload) => {
+      if (payload.mediaUrl || payload.mediaUrls?.length) {
+        toolResultMedia.push(payload);
+      }
+    };
     const replyOpts = {
       isHeartbeat: true,
       ...(heartbeatModelOverride ? { heartbeatModelOverride } : {}),
@@ -967,11 +977,29 @@ export async function runHeartbeatOnce(opts: {
       // Heartbeat timeout is a per-run override so user turns keep the global default.
       timeoutOverrideSeconds,
       bootstrapContextMode,
+      onToolResult,
     };
-    const getReplyFromConfig =
-      opts.deps?.getReplyFromConfig ?? (await loadHeartbeatRunnerRuntime()).getReplyFromConfig;
     const replyResult = await getReplyFromConfig(ctx, replyOpts, cfg);
-    const replyPayload = resolveHeartbeatReplyPayload(replyResult);
+    let replyPayload = resolveHeartbeatReplyPayload(replyResult);
+    // When the agent produced media via a tool (e.g. TTS) but responded with
+    // a silent token like NO_REPLY, the payload will be empty.  Fall back to
+    // the captured tool result media so it still gets delivered.
+    if (
+      (!replyPayload ||
+        (!replyPayload.text && !replyPayload.mediaUrl && !replyPayload.mediaUrls?.length)) &&
+      toolResultMedia.length > 0
+    ) {
+      const mediaUrls = toolResultMedia.flatMap(
+        (p) => p.mediaUrls ?? (p.mediaUrl ? [p.mediaUrl] : []),
+      );
+      if (mediaUrls.length > 0) {
+        replyPayload = {
+          mediaUrls,
+          mediaUrl: mediaUrls[0],
+          audioAsVoice: toolResultMedia.some((p) => p.audioAsVoice),
+        };
+      }
+    }
     const includeReasoning = heartbeat?.includeReasoning === true;
     const reasoningPayloads = includeReasoning
       ? resolveHeartbeatReasoningPayloads(replyResult).filter((payload) => payload !== replyPayload)
