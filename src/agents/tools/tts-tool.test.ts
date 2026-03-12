@@ -3,11 +3,17 @@ import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import * as ttsRuntime from "../../tts/tts.js";
 import { createTtsTool } from "./tts-tool.js";
 
+const copyFileMock = vi.fn(async () => undefined);
+vi.mock("node:fs/promises", () => ({
+  copyFile: copyFileMock,
+}));
+
 let textToSpeechSpy: ReturnType<typeof vi.spyOn>;
 
 describe("createTtsTool", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    copyFileMock.mockClear();
     textToSpeechSpy = vi.spyOn(ttsRuntime, "textToSpeech");
   });
 
@@ -151,12 +157,8 @@ describe("createTtsTool", () => {
     const result = await tool.execute("call-1", { text: spoken });
 
     const rendered = (result.content as Array<{ type: string; text: string }>)[0].text;
-    // The literal directive tokens must not appear verbatim, so
-    // parseReplyDirectives can no longer surface them as media/audio flags.
     expect(rendered).not.toMatch(/^MEDIA:/m);
     expect(rendered).not.toContain("[[audio_as_voice]]");
-    // The transcript still contains the original characters, just interrupted
-    // by a zero-width word joiner (U+2060) that keeps the pattern from firing.
     expect(rendered).toContain("\u2060MEDIA:");
     expect(rendered).toContain("[\u2060[audio_as_voice]]");
   });
@@ -206,6 +208,54 @@ describe("createTtsTool", () => {
 
     await expect(tool.execute("call-1", { text: "hello" })).rejects.toThrow(
       "TTS conversion failed: openai: not configured",
+    );
+  });
+
+  it("returns renamed media path when filename is provided", async () => {
+    textToSpeechSpy.mockResolvedValue({
+      success: true,
+      audioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
+      voiceCompatible: false,
+      provider: "edge",
+    });
+
+    const tool = createTtsTool();
+    const result = await tool.execute("call-1", {
+      text: "hello",
+      filename: "laszlo-morning.mp3",
+    });
+
+    expect(copyFileMock).toHaveBeenCalledWith(
+      "/tmp/openclaw/tts-123/voice-abc.mp3",
+      "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+    );
+    expect(result.details).toMatchObject({
+      audioPath: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+      originalAudioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
+      filename: "laszlo-morning.mp3",
+      media: {
+        mediaUrl: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+      },
+    });
+  });
+
+  it("sanitizes filename and preserves extension fallback", async () => {
+    textToSpeechSpy.mockResolvedValue({
+      success: true,
+      audioPath: "/tmp/openclaw/tts-456/voice-xyz.mp3",
+      voiceCompatible: false,
+      provider: "edge",
+    });
+
+    const tool = createTtsTool();
+    await tool.execute("call-2", {
+      text: "hello",
+      filename: "../../weird title",
+    });
+
+    expect(copyFileMock).toHaveBeenLastCalledWith(
+      "/tmp/openclaw/tts-456/voice-xyz.mp3",
+      "/tmp/openclaw/tts-456/weird-title.mp3",
     );
   });
 });

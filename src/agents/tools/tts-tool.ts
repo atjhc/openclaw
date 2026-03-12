@@ -1,3 +1,5 @@
+import { copyFile } from "node:fs/promises";
+import path from "node:path";
 import { Type } from "typebox";
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import { getRuntimeConfig } from "../../config/config.js";
@@ -18,6 +20,12 @@ const TtsToolSchema = Type.Object({
       minimum: 1,
     }),
   ),
+  filename: Type.Optional(
+    Type.String({
+      description:
+        "Optional attachment filename override (for channels that show attachment names).",
+    }),
+  ),
 });
 
 function readTtsTimeoutMs(args: Record<string, unknown>): number | undefined {
@@ -32,6 +40,34 @@ function readTtsTimeoutMs(args: Record<string, unknown>): number | undefined {
     throw new ToolInputError("timeoutMs must be a positive integer in milliseconds.");
   }
   return timeoutMs;
+}
+
+function sanitizeFilename(input: string, fallbackExt: string): string {
+  const trimmed = input.trim();
+  const base = path.basename(trimmed).replace(/[\u0000-\u001f\u007f]+/g, "");
+  const cleaned = base.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const withDefault = cleaned || `voice${fallbackExt || ".mp3"}`;
+  const ext = path.extname(withDefault);
+  if (ext) {
+    return withDefault;
+  }
+  return `${withDefault}${fallbackExt || ".mp3"}`;
+}
+
+async function maybeApplyFilename(audioPath: string, requestedFilename?: string): Promise<string> {
+  if (!requestedFilename?.trim()) {
+    return audioPath;
+  }
+  const fallbackExt = path.extname(audioPath) || ".mp3";
+  const safeName = sanitizeFilename(requestedFilename, fallbackExt);
+  const targetPath = path.join(path.dirname(audioPath), safeName);
+
+  if (path.resolve(targetPath) === path.resolve(audioPath)) {
+    return audioPath;
+  }
+
+  await copyFile(audioPath, targetPath);
+  return targetPath;
 }
 
 /**
@@ -71,6 +107,7 @@ export function createTtsTool(opts?: {
       const text = readStringParam(params, "text", { required: true });
       const channel = readStringParam(params, "channel");
       const timeoutMs = readTtsTimeoutMs(params);
+      const filename = readStringParam(params, "filename");
       const cfg = opts?.config ?? getRuntimeConfig();
       const result = await textToSpeech({
         text,
@@ -82,6 +119,7 @@ export function createTtsTool(opts?: {
       });
 
       if (result.success && result.audioPath) {
+        const resolvedAudioPath = await maybeApplyFilename(result.audioPath, filename);
         // Preserve the spoken text in the tool result content so the session
         // transcript retains what was said across turns. The audio itself is
         // still delivered via details.media. Sanitize first so a crafted
@@ -90,11 +128,13 @@ export function createTtsTool(opts?: {
         return {
           content: [{ type: "text", text: `(spoken) ${sanitizeTranscriptForToolContent(text)}` }],
           details: {
-            audioPath: result.audioPath,
+            audioPath: resolvedAudioPath,
+            originalAudioPath: result.audioPath,
             provider: result.provider,
+            filename: filename?.trim() || undefined,
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
             media: {
-              mediaUrl: result.audioPath,
+              mediaUrl: resolvedAudioPath,
               trustedLocalMedia: true,
               ...(result.audioAsVoice || result.voiceCompatible ? { audioAsVoice: true } : {}),
             },
