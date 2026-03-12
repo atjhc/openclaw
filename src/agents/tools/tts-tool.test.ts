@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../auto-reply/tokens.js", () => ({
   SILENT_REPLY_TOKEN: "QUIET_TOKEN",
@@ -21,6 +21,11 @@ vi.mock("node:fs/promises", () => ({
 const { createTtsTool } = await import("./tts-tool.js");
 
 describe("createTtsTool", () => {
+  beforeEach(() => {
+    textToSpeechMock.mockReset();
+    copyFileMock.mockReset();
+  });
+
   it("uses SILENT_REPLY_TOKEN in guidance text", () => {
     const tool = createTtsTool();
 
@@ -50,10 +55,8 @@ describe("createTtsTool", () => {
       audioPath: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
       originalAudioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
       filename: "laszlo-morning.mp3",
-    });
-    expect(result.content[0]).toMatchObject({
-      type: "text",
-      text: "MEDIA:/tmp/openclaw/tts-123/laszlo-morning.mp3",
+      filenameApplied: true,
+      safeMode: false,
     });
   });
 
@@ -75,5 +78,55 @@ describe("createTtsTool", () => {
       "/tmp/openclaw/tts-456/voice-xyz.mp3",
       "/tmp/openclaw/tts-456/weird-title.mp3",
     );
+  });
+
+  it("safeMode bypasses filename rewriting and forces edge override", async () => {
+    textToSpeechMock.mockResolvedValueOnce({
+      success: true,
+      audioPath: "/tmp/openclaw/tts-789/voice-safe.mp3",
+      voiceCompatible: true,
+      provider: "edge",
+    });
+
+    const tool = createTtsTool();
+    const result = await tool.execute("call-3", {
+      text: "hello",
+      filename: "ignored.mp3",
+      safeMode: true,
+    });
+
+    expect(copyFileMock).not.toHaveBeenCalled();
+    expect(textToSpeechMock).toHaveBeenCalledWith(
+      expect.objectContaining({ overrides: { provider: "edge" } }),
+    );
+    expect(result.content[0]).toMatchObject({
+      text: "[[audio_as_voice]]\nMEDIA:/tmp/openclaw/tts-789/voice-safe.mp3",
+    });
+  });
+
+  it("retries once in safe fallback when first synth fails", async () => {
+    textToSpeechMock
+      .mockResolvedValueOnce({ success: false, error: "openai: server error" })
+      .mockResolvedValueOnce({
+        success: true,
+        audioPath: "/tmp/openclaw/tts-999/voice-fallback.mp3",
+        voiceCompatible: false,
+        provider: "edge",
+      });
+
+    const tool = createTtsTool();
+    const result = await tool.execute("call-4", {
+      text: "hello",
+      filename: "try-me.mp3",
+    });
+
+    expect(textToSpeechMock).toHaveBeenCalledTimes(2);
+    expect(textToSpeechMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ overrides: { provider: "edge" } }),
+    );
+    expect(result.details).toMatchObject({
+      usedSafeFallback: true,
+      provider: "edge",
+    });
   });
 });
