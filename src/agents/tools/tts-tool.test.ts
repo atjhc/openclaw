@@ -3,11 +3,17 @@ import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import * as ttsRuntime from "../../tts/tts.js";
 import { createTtsTool } from "./tts-tool.js";
 
+const copyFileMock = vi.fn(async () => undefined);
+vi.mock("node:fs/promises", () => ({
+  copyFile: copyFileMock,
+}));
+
 let textToSpeechSpy: ReturnType<typeof vi.spyOn>;
 
 describe("createTtsTool", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    copyFileMock.mockClear();
     textToSpeechSpy = vi.spyOn(ttsRuntime, "textToSpeech");
   });
 
@@ -39,6 +45,33 @@ describe("createTtsTool", () => {
         },
       },
     });
-    expect(JSON.stringify(result.content)).not.toContain("MEDIA:");
+  });
+
+  it("returns renamed media path when filename is provided", async () => {
+    textToSpeechSpy.mockResolvedValueOnce({
+      success: true,
+      audioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
+      voiceCompatible: false,
+      provider: "edge",
+    });
+
+    const tool = createTtsTool();
+    const result = await tool.execute("call-1", {
+      text: "hello",
+      filename: "laszlo-morning.mp3",
+    });
+
+    expect(copyFileMock).toHaveBeenCalledWith(
+      "/tmp/openclaw/tts-123/voice-abc.mp3",
+      "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+    );
+    expect(result.details).toMatchObject({
+      audioPath: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+      originalAudioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
+      filename: "laszlo-morning.mp3",
+      media: {
+        mediaUrl: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+      },
+    });
   });
 });
