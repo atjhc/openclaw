@@ -4,6 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
+import type { TtsDirectiveOverrides } from "../../tts/tts.js";
 import { textToSpeech } from "../../tts/tts.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import type { AnyAgentTool } from "./common.js";
@@ -18,6 +19,17 @@ const TtsToolSchema = Type.Object({
     Type.String({
       description:
         "Optional attachment filename override (for channels that show attachment names).",
+    }),
+  ),
+  safeMode: Type.Optional(
+    Type.Boolean({
+      description:
+        "If true, disables filename rewriting and forces conservative edge-provider synthesis.",
+    }),
+  ),
+  voicePreset: Type.Optional(
+    Type.Union([Type.Literal("default"), Type.Literal("laszlo")], {
+      description: "Voice preset. 'laszlo' pins synthesis to the stable Laszlo voice path.",
     }),
   ),
 });
@@ -50,6 +62,31 @@ async function maybeApplyFilename(audioPath: string, requestedFilename?: string)
   return targetPath;
 }
 
+function readBooleanParam(params: Record<string, unknown>, key: string): boolean | undefined {
+  if (Object.hasOwn(params, key) && typeof params[key] === "boolean") {
+    return params[key] as boolean;
+  }
+  const snake = key.replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`);
+  if (Object.hasOwn(params, snake) && typeof params[snake] === "boolean") {
+    return params[snake] as boolean;
+  }
+  return undefined;
+}
+
+function resolveTtsOverrides(params: {
+  safeMode: boolean;
+  voicePreset?: string;
+}): TtsDirectiveOverrides | undefined {
+  const wantsLaszlo = params.voicePreset === "laszlo";
+  if (!params.safeMode && !wantsLaszlo) {
+    return undefined;
+  }
+
+  // Conservative/stable path: force Edge provider (which carries the configured
+  // local Laszlo voice identity in this deployment).
+  return { provider: "edge" };
+}
+
 export function createTtsTool(opts?: {
   config?: OpenClawConfig;
   agentChannel?: GatewayMessageChannel;
@@ -64,15 +101,44 @@ export function createTtsTool(opts?: {
       const text = readStringParam(params, "text", { required: true });
       const channel = readStringParam(params, "channel");
       const filename = readStringParam(params, "filename");
+      const safeMode = readBooleanParam(params, "safeMode") ?? false;
+      const voicePreset = readStringParam(params, "voicePreset");
+
       const cfg = opts?.config ?? loadConfig();
-      const result = await textToSpeech({
+      const primaryOverrides = resolveTtsOverrides({ safeMode, voicePreset });
+      let result = await textToSpeech({
         text,
         cfg,
         channel: channel ?? opts?.agentChannel,
+        overrides: primaryOverrides,
       });
 
+      let usedSafeFallback = false;
+      if (!result.success && !safeMode) {
+        // Graceful fallback: retry once in conservative safe mode.
+        usedSafeFallback = true;
+        result = await textToSpeech({
+          text,
+          cfg,
+          channel: channel ?? opts?.agentChannel,
+          overrides: { provider: "edge" },
+        });
+      }
+
       if (result.success && result.audioPath) {
-        const resolvedAudioPath = await maybeApplyFilename(result.audioPath, filename);
+        let resolvedAudioPath = result.audioPath;
+        let filenameApplied = false;
+
+        if (!safeMode && filename?.trim()) {
+          try {
+            resolvedAudioPath = await maybeApplyFilename(result.audioPath, filename);
+            filenameApplied = resolvedAudioPath !== result.audioPath;
+          } catch {
+            // Graceful fallback: keep original path if filename copy fails.
+            resolvedAudioPath = result.audioPath;
+          }
+        }
+
         const lines: string[] = [];
         // Tag Telegram Opus output as a voice bubble instead of a file attachment.
         if (result.voiceCompatible) {
@@ -86,6 +152,10 @@ export function createTtsTool(opts?: {
             originalAudioPath: result.audioPath,
             provider: result.provider,
             filename: filename?.trim() || undefined,
+            filenameApplied,
+            safeMode,
+            usedSafeFallback,
+            voicePreset: voicePreset || undefined,
           },
         };
       }
@@ -94,10 +164,12 @@ export function createTtsTool(opts?: {
         content: [
           {
             type: "text",
-            text: result.error ?? "TTS conversion failed",
+            text:
+              result.error ??
+              "TTS conversion failed. Please retry once; if it persists, use safeMode=true.",
           },
         ],
-        details: { error: result.error },
+        details: { error: result.error, safeMode, usedSafeFallback },
       };
     },
   };
