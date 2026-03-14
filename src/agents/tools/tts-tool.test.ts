@@ -28,7 +28,7 @@ describe("createTtsTool", () => {
     expect(tool.description).not.toContain("NO_REPLY");
   });
 
-  it("stores audio delivery in details.media", async () => {
+  it("returns audio path in tool result and lets agent send MEDIA", async () => {
     textToSpeechMock.mockResolvedValueOnce({
       success: true,
       audioPath: "/tmp/reply.opus",
@@ -40,14 +40,16 @@ describe("createTtsTool", () => {
     const result = await tool.execute("call-1", { text: "hello" });
 
     expect(result).toMatchObject({
-      content: [{ type: "text", text: "Generated audio reply." }],
+      content: [
+        {
+          type: "text",
+          text: "Audio generated. Path: /tmp/reply.opus (voice compatible)",
+        },
+      ],
       details: {
         audioPath: "/tmp/reply.opus",
         provider: "test",
-        media: {
-          mediaUrl: "/tmp/reply.opus",
-          audioAsVoice: true,
-        },
+        voiceCompatible: true,
       },
     });
     expect(JSON.stringify(result.content)).not.toContain("MEDIA:");
@@ -75,9 +77,7 @@ describe("createTtsTool", () => {
       audioPath: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
       originalAudioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
       filename: "laszlo-morning.mp3",
-      media: {
-        mediaUrl: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
-      },
+      voiceCompatible: false,
     });
   });
 });
