@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SubagentRunRecord } from "../../agents/subagent-registry.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
+  __testing as abortTesting,
   getAbortMemory,
   getAbortMemorySizeForTest,
   isAbortRequestText,
@@ -17,6 +18,7 @@ import {
   tryFastAbortFromMessage,
 } from "./abort.js";
 import { enqueueFollowupRun, getFollowupQueueDepth, type FollowupRun } from "./queue.js";
+import { __testing as queueCleanupTesting } from "./queue/cleanup.js";
 import { initSessionState } from "./session.js";
 import { buildTestCtx } from "./test-ctx.js";
 
@@ -26,7 +28,7 @@ vi.mock("../../agents/pi-embedded.js", () => ({
 }));
 
 const commandQueueMocks = vi.hoisted(() => ({
-  clearCommandLane: vi.fn(),
+  clearCommandLane: vi.fn(() => 1),
 }));
 
 vi.mock("../../process/command-queue.js", () => commandQueueMocks);
@@ -40,6 +42,7 @@ const subagentRegistryMocks = vi.hoisted(() => ({
 
 vi.mock("../../agents/subagent-registry.js", () => ({
   listSubagentRunsForRequester: subagentRegistryMocks.listSubagentRunsForRequester,
+  listSubagentRunsForController: subagentRegistryMocks.listSubagentRunsForRequester,
   markSubagentRunTerminated: subagentRegistryMocks.markSubagentRunTerminated,
 }));
 
@@ -161,8 +164,29 @@ describe("abort detection", () => {
     expect(commandQueueMocks.clearCommandLane).toHaveBeenCalledWith(`session:${sessionKey}`);
   }
 
+  beforeEach(() => {
+    abortTesting.setDepsForTests({
+      getAcpSessionManager: (() =>
+        ({
+          resolveSession: acpManagerMocks.resolveSession,
+          cancelSession: acpManagerMocks.cancelSession,
+        }) as never) as never,
+      abortEmbeddedPiRun: () => true,
+      listSubagentRunsForController: subagentRegistryMocks.listSubagentRunsForRequester,
+      markSubagentRunTerminated: subagentRegistryMocks.markSubagentRunTerminated,
+    });
+    queueCleanupTesting.setDepsForTests({
+      resolveEmbeddedSessionLane: (key) => `session:${key.trim() || "main"}`,
+      clearCommandLane: commandQueueMocks.clearCommandLane,
+    });
+    commandQueueMocks.clearCommandLane.mockClear().mockReturnValue(1);
+  });
+
   afterEach(() => {
     resetAbortMemoryForTest();
+    abortTesting.resetDepsForTests();
+    queueCleanupTesting.resetDepsForTests();
+    commandQueueMocks.clearCommandLane.mockClear().mockReturnValue(1);
     acpManagerMocks.resolveSession.mockReset().mockReturnValue({ kind: "none" });
     acpManagerMocks.cancelSession.mockReset().mockResolvedValue(undefined);
   });
@@ -354,6 +378,20 @@ describe("abort detection", () => {
     });
     expect(resolveSessionEntryForKey(store, "session-2")).toEqual({});
     expect(resolveSessionEntryForKey(undefined, "session-1")).toEqual({});
+  });
+
+  it("resolves Telegram forum topic session when lookup key has different casing than store", () => {
+    // Store normalizes keys to lowercase; caller may pass mixed-case. /stop in topic must find entry.
+    const storeKey = "agent:main:telegram:group:-1001234567890:topic:99";
+    const lookupKey = "Agent:Main:Telegram:Group:-1001234567890:Topic:99";
+    const store = {
+      [storeKey]: { sessionId: "pi-topic-99", updatedAt: 0 },
+    } as Record<string, { sessionId: string; updatedAt: number }>;
+    // Direct lookup fails (store uses lowercase keys); normalization fallback must succeed.
+    expect(store[lookupKey]).toBeUndefined();
+    const result = resolveSessionEntryForKey(store, lookupKey);
+    expect(result.entry?.sessionId).toBe("pi-topic-99");
+    expect(result.key).toBe(storeKey);
   });
 
   it("fast-aborts even when text commands are disabled", async () => {

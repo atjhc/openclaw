@@ -10,8 +10,8 @@ import { defaultRuntime } from "../runtime.js";
 import { note } from "../terminal/note.js";
 import { resolveUserPath } from "../utils.js";
 import { createClackPrompter } from "../wizard/clack-prompter.js";
-import { resolveOnboardingSecretInputString } from "../wizard/onboarding.secret-input.js";
 import { WizardCancelledError } from "../wizard/prompts.js";
+import { resolveSetupSecretInputString } from "../wizard/setup.secret-input.js";
 import { removeChannelConfigWizard } from "./configure.channels.js";
 import { maybeInstallDaemon } from "./configure.daemon.js";
 import { promptAuthConfig } from "./configure.gateway-auth.js";
@@ -37,7 +37,6 @@ import {
   DEFAULT_WORKSPACE,
   ensureWorkspaceAndSessions,
   guardCancel,
-  printWizardHeader,
   probeGatewayReachable,
   resolveControlUiLinks,
   summarizeExistingConfig,
@@ -54,7 +53,7 @@ async function resolveGatewaySecretInputForWizard(params: {
   path: string;
 }): Promise<string | undefined> {
   try {
-    return await resolveOnboardingSecretInputString({
+    return await resolveSetupSecretInputString({
       config: params.cfg,
       value: params.value,
       path: params.path,
@@ -88,12 +87,8 @@ async function runGatewayHealthCheck(params: {
     value: params.cfg.gateway?.auth?.password,
     path: "gateway.auth.password",
   });
-  const token =
-    process.env.OPENCLAW_GATEWAY_TOKEN ?? process.env.CLAWDBOT_GATEWAY_TOKEN ?? configuredToken;
-  const password =
-    process.env.OPENCLAW_GATEWAY_PASSWORD ??
-    process.env.CLAWDBOT_GATEWAY_PASSWORD ??
-    configuredPassword;
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN ?? configuredToken;
+  const password = process.env.OPENCLAW_GATEWAY_PASSWORD ?? configuredPassword;
 
   await waitForGatewayReachable({
     url: wsUrl,
@@ -166,18 +161,40 @@ async function promptWebToolsConfig(
 ): Promise<OpenClawConfig> {
   const existingSearch = nextConfig.tools?.web?.search;
   const existingFetch = nextConfig.tools?.web?.fetch;
-  const existingProvider = existingSearch?.provider ?? "brave";
-  const hasPerplexityKey = Boolean(
-    existingSearch?.perplexity?.apiKey || process.env.PERPLEXITY_API_KEY,
-  );
-  const hasBraveKey = Boolean(existingSearch?.apiKey || process.env.BRAVE_API_KEY);
-  const hasSearchKey = existingProvider === "perplexity" ? hasPerplexityKey : hasBraveKey;
+  const {
+    resolveSearchProviderOptions,
+    resolveExistingKey,
+    hasExistingKey,
+    applySearchKey,
+    applySearchProviderSelection,
+    hasKeyInEnv,
+  } = await import("./onboard-search.js");
+  const searchProviderOptions = resolveSearchProviderOptions(nextConfig);
+  const defaultProvider = searchProviderOptions[0]?.id;
+
+  const hasKeyForProvider = (provider: string): boolean => {
+    const entry = searchProviderOptions.find((e) => e.id === provider);
+    if (!entry) {
+      return false;
+    }
+    if (entry.requiresCredential === false) {
+      return true;
+    }
+    return hasExistingKey(nextConfig, provider) || hasKeyInEnv(entry);
+  };
+
+  const existingProvider = (() => {
+    const stored = existingSearch?.provider;
+    if (stored && searchProviderOptions.some((e) => e.id === stored)) {
+      return stored;
+    }
+    return searchProviderOptions.find((e) => hasKeyForProvider(e.id))?.id ?? defaultProvider;
+  })();
 
   note(
     [
       "Web search lets your agent look things up online using the `web_search` tool.",
-      "Choose a provider: Perplexity Search (recommended) or Brave Search.",
-      "Both return structured results (title, URL, snippet) for fast research.",
+      "Choose a provider. Some providers need an API key, and some work key-free.",
       "Docs: https://docs.openclaw.ai/tools/web",
     ].join("\n"),
     "Web search",
@@ -186,89 +203,111 @@ async function promptWebToolsConfig(
   const enableSearch = guardCancel(
     await confirm({
       message: "Enable web_search?",
-      initialValue: existingSearch?.enabled ?? hasSearchKey,
+      initialValue:
+        existingSearch?.enabled ?? searchProviderOptions.some((e) => hasKeyForProvider(e.id)),
     }),
     runtime,
   );
 
-  let nextSearch = {
+  let nextSearch: Record<string, unknown> = {
     ...existingSearch,
     enabled: enableSearch,
   };
+  let workingConfig = nextConfig;
 
   if (enableSearch) {
-    const providerChoice = guardCancel(
-      await select({
-        message: "Choose web search provider",
-        options: [
-          {
-            value: "perplexity",
-            label: "Perplexity Search",
-          },
-          {
-            value: "brave",
-            label: "Brave Search",
-          },
-        ],
-        initialValue: existingProvider,
-      }),
-      runtime,
-    );
-
-    nextSearch = { ...nextSearch, provider: providerChoice };
-
-    if (providerChoice === "perplexity") {
-      const hasKey = Boolean(existingSearch?.perplexity?.apiKey);
-      const keyInput = guardCancel(
-        await text({
-          message: hasKey
-            ? "Perplexity API key (leave blank to keep current or use PERPLEXITY_API_KEY)"
-            : "Perplexity API key (paste it here; leave blank to use PERPLEXITY_API_KEY)",
-          placeholder: hasKey ? "Leave blank to keep current" : "pplx-...",
-        }),
-        runtime,
+    if (searchProviderOptions.length === 0) {
+      note(
+        [
+          "No web search providers are currently available under this plugin policy.",
+          "Enable plugins or remove deny rules, then rerun configure.",
+          "Docs: https://docs.openclaw.ai/tools/web",
+        ].join("\n"),
+        "Web search",
       );
-      const key = String(keyInput ?? "").trim();
-      if (key) {
-        nextSearch = {
-          ...nextSearch,
-          perplexity: { ...existingSearch?.perplexity, apiKey: key },
-        };
-      } else if (!hasKey && !process.env.PERPLEXITY_API_KEY) {
-        note(
-          [
-            "No key stored yet, so web_search will stay unavailable.",
-            "Store a key here or set PERPLEXITY_API_KEY in the Gateway environment.",
-            "Get your API key at: https://www.perplexity.ai/settings/api",
-            "Docs: https://docs.openclaw.ai/tools/web",
-          ].join("\n"),
-          "Web search",
-        );
-      }
+      nextSearch = {
+        ...existingSearch,
+        enabled: false,
+      };
     } else {
-      const hasKey = Boolean(existingSearch?.apiKey);
-      const keyInput = guardCancel(
-        await text({
-          message: hasKey
-            ? "Brave Search API key (leave blank to keep current or use BRAVE_API_KEY)"
-            : "Brave Search API key (paste it here; leave blank to use BRAVE_API_KEY)",
-          placeholder: hasKey ? "Leave blank to keep current" : "BSA...",
+      const providerOptions = searchProviderOptions.map((entry) => {
+        const configured = hasKeyForProvider(entry.id);
+        return {
+          value: entry.id,
+          label: entry.label,
+          hint:
+            entry.requiresCredential === false
+              ? `${entry.hint} · key-free`
+              : configured
+                ? `${entry.hint} · configured`
+                : entry.hint,
+        };
+      });
+
+      const providerChoice = guardCancel(
+        await select({
+          message: "Choose web search provider",
+          options: providerOptions,
+          initialValue: existingProvider,
         }),
         runtime,
       );
-      const key = String(keyInput ?? "").trim();
-      if (key) {
-        nextSearch = { ...nextSearch, apiKey: key };
-      } else if (!hasKey && !process.env.BRAVE_API_KEY) {
+
+      nextSearch = { ...nextSearch, provider: providerChoice };
+
+      const entry = searchProviderOptions.find((e) => e.id === providerChoice)!;
+      const credentialLabel = entry.credentialLabel?.trim() || `${entry.label} API key`;
+      const existingKey = resolveExistingKey(nextConfig, providerChoice);
+      const keyConfigured = hasExistingKey(nextConfig, providerChoice);
+      const envAvailable = entry.envVars.some((k) => Boolean(process.env[k]?.trim()));
+      const envVarNames = entry.envVars.join(" / ");
+      const needsCredential = entry.requiresCredential !== false;
+
+      if (!needsCredential) {
+        workingConfig = applySearchProviderSelection(workingConfig, providerChoice);
+        nextSearch = { ...workingConfig.tools?.web?.search };
         note(
           [
-            "No key stored yet, so web_search will stay unavailable.",
-            "Store a key here or set BRAVE_API_KEY in the Gateway environment.",
-            "Get your API key at: https://brave.com/search/api/",
-            "Docs: https://docs.openclaw.ai/tools/web",
+            `${entry.label} works without an API key.`,
+            "OpenClaw enabled the plugin and selected it as your web_search provider.",
+            `Docs: ${entry.docsUrl ?? "https://docs.openclaw.ai/tools/web"}`,
           ].join("\n"),
           "Web search",
         );
+      } else {
+        const keyInput = guardCancel(
+          await text({
+            message: keyConfigured
+              ? envAvailable
+                ? `${credentialLabel} (leave blank to keep current or use ${envVarNames})`
+                : `${credentialLabel} (leave blank to keep current)`
+              : envAvailable
+                ? `${credentialLabel} (paste it here; leave blank to use ${envVarNames})`
+                : credentialLabel,
+            placeholder: keyConfigured ? "Leave blank to keep current" : entry.placeholder,
+          }),
+          runtime,
+        );
+        const key = String(keyInput ?? "").trim();
+
+        if (key || existingKey) {
+          workingConfig = applySearchKey(workingConfig, providerChoice, (key || existingKey)!);
+          nextSearch = { ...workingConfig.tools?.web?.search };
+        } else if (keyConfigured || envAvailable) {
+          workingConfig = applySearchProviderSelection(workingConfig, providerChoice);
+          nextSearch = { ...workingConfig.tools?.web?.search };
+        } else {
+          nextSearch = { ...nextSearch, provider: providerChoice };
+          note(
+            [
+              "No key stored yet — web_search won't work until a key is available.",
+              `Store your ${credentialLabel} here or set ${envVarNames} in the Gateway environment.`,
+              `Get your API key at: ${entry.signupUrl}`,
+              "Docs: https://docs.openclaw.ai/tools/web",
+            ].join("\n"),
+            "Web search",
+          );
+        }
       }
     }
   }
@@ -287,11 +326,11 @@ async function promptWebToolsConfig(
   };
 
   return {
-    ...nextConfig,
+    ...workingConfig,
     tools: {
-      ...nextConfig.tools,
+      ...workingConfig.tools,
       web: {
-        ...nextConfig.tools?.web,
+        ...workingConfig.tools?.web,
         search: nextSearch,
         fetch: nextFetch,
       },
@@ -304,7 +343,6 @@ export async function runConfigureWizard(
   runtime: RuntimeEnv = defaultRuntime,
 ) {
   try {
-    printWizardHeader(runtime);
     intro(opts.command === "update" ? "OpenClaw update wizard" : "OpenClaw configure");
     const prompter = createClackPrompter();
 
@@ -346,14 +384,8 @@ export async function runConfigureWizard(
     });
     const localProbe = await probeGatewayReachable({
       url: localUrl,
-      token:
-        process.env.OPENCLAW_GATEWAY_TOKEN ??
-        process.env.CLAWDBOT_GATEWAY_TOKEN ??
-        baseLocalProbeToken,
-      password:
-        process.env.OPENCLAW_GATEWAY_PASSWORD ??
-        process.env.CLAWDBOT_GATEWAY_PASSWORD ??
-        baseLocalProbePassword,
+      token: process.env.OPENCLAW_GATEWAY_TOKEN ?? baseLocalProbeToken,
+      password: process.env.OPENCLAW_GATEWAY_PASSWORD ?? baseLocalProbePassword,
     });
     const remoteUrl = baseConfig.gateway?.remote?.url?.trim() ?? "";
     const baseRemoteProbeToken = await resolveGatewaySecretInputForWizard({
@@ -637,10 +669,9 @@ export async function runConfigureWizard(
       customBindHost: nextConfig.gateway?.customBindHost,
       basePath: nextConfig.gateway?.controlUi?.basePath,
     });
-    // Try both new and old passwords since gateway may still have old config.
+    // Try both newly written and preexisting passwords while the gateway restarts.
     const newPassword =
       process.env.OPENCLAW_GATEWAY_PASSWORD ??
-      process.env.CLAWDBOT_GATEWAY_PASSWORD ??
       (await resolveGatewaySecretInputForWizard({
         cfg: nextConfig,
         value: nextConfig.gateway?.auth?.password,
@@ -648,7 +679,6 @@ export async function runConfigureWizard(
       }));
     const oldPassword =
       process.env.OPENCLAW_GATEWAY_PASSWORD ??
-      process.env.CLAWDBOT_GATEWAY_PASSWORD ??
       (await resolveGatewaySecretInputForWizard({
         cfg: baseConfig,
         value: baseConfig.gateway?.auth?.password,
@@ -656,7 +686,6 @@ export async function runConfigureWizard(
       }));
     const token =
       process.env.OPENCLAW_GATEWAY_TOKEN ??
-      process.env.CLAWDBOT_GATEWAY_TOKEN ??
       (await resolveGatewaySecretInputForWizard({
         cfg: nextConfig,
         value: nextConfig.gateway?.auth?.token,

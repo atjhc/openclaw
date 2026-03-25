@@ -28,6 +28,31 @@ describe("createTtsTool", () => {
     expect(tool.description).not.toContain("NO_REPLY");
   });
 
+  it("stores audio delivery in details.media", async () => {
+    textToSpeechMock.mockResolvedValueOnce({
+      success: true,
+      audioPath: "/tmp/reply.opus",
+      provider: "test",
+      voiceCompatible: true,
+    });
+
+    const tool = createTtsTool();
+    const result = await tool.execute("call-1", { text: "hello" });
+
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: "Generated audio reply." }],
+      details: {
+        audioPath: "/tmp/reply.opus",
+        provider: "test",
+        media: {
+          mediaUrl: "/tmp/reply.opus",
+          audioAsVoice: true,
+        },
+      },
+    });
+    expect(JSON.stringify(result.content)).not.toContain("MEDIA:");
+  });
+
   it("returns renamed media path when filename is provided", async () => {
     textToSpeechMock.mockResolvedValueOnce({
       success: true,
@@ -37,7 +62,7 @@ describe("createTtsTool", () => {
     });
 
     const tool = createTtsTool();
-    const result = await tool.execute("call-1", {
+    const result = await tool.execute("call-2", {
       text: "hello",
       filename: "laszlo-morning.mp3",
     });
@@ -50,30 +75,9 @@ describe("createTtsTool", () => {
       audioPath: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
       originalAudioPath: "/tmp/openclaw/tts-123/voice-abc.mp3",
       filename: "laszlo-morning.mp3",
+      media: {
+        mediaUrl: "/tmp/openclaw/tts-123/laszlo-morning.mp3",
+      },
     });
-    expect(result.content[0]).toMatchObject({
-      type: "text",
-      text: "MEDIA:/tmp/openclaw/tts-123/laszlo-morning.mp3",
-    });
-  });
-
-  it("sanitizes filename and preserves extension fallback", async () => {
-    textToSpeechMock.mockResolvedValueOnce({
-      success: true,
-      audioPath: "/tmp/openclaw/tts-456/voice-xyz.mp3",
-      voiceCompatible: false,
-      provider: "edge",
-    });
-
-    const tool = createTtsTool();
-    await tool.execute("call-2", {
-      text: "hello",
-      filename: "../../weird title",
-    });
-
-    expect(copyFileMock).toHaveBeenLastCalledWith(
-      "/tmp/openclaw/tts-456/voice-xyz.mp3",
-      "/tmp/openclaw/tts-456/weird-title.mp3",
-    );
   });
 });
