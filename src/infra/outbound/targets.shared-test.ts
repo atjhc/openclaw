@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseTelegramTarget } from "../../../extensions/telegram/api.js";
-import { telegramOutbound, whatsappOutbound } from "../../../test/channel-outbounds.js";
-import type { OpenClawConfig } from "../../config/config.js";
-import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../plugin-sdk/whatsapp-shared.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
-import { createOutboundTestPlugin, createTestRegistry } from "../../test-utils/channel-plugins.js";
 import { resolveOutboundTarget } from "./targets.js";
+import {
+  createTargetsTestRegistry,
+  createTelegramTestPlugin,
+  createWhatsAppTestPlugin,
+} from "./targets.test-helpers.js";
 
 const telegramMessaging = {
   parseExplicitTarget: ({ raw }: { raw: string }) => {
@@ -34,51 +34,12 @@ const whatsappMessaging = {
 export function installResolveOutboundTargetPluginRegistryHooks(): void {
   beforeEach(() => {
     setActivePluginRegistry(
-      createTestRegistry([
-        {
-          pluginId: "whatsapp",
-          plugin: {
-            ...createOutboundTestPlugin({
-              id: "whatsapp",
-              label: "WhatsApp",
-              outbound: whatsappOutbound,
-              messaging: whatsappMessaging,
-            }),
-            config: {
-              listAccountIds: () => [],
-              resolveDefaultTo: ({ cfg }: { cfg: OpenClawConfig }) =>
-                typeof cfg.channels?.whatsapp?.defaultTo === "string"
-                  ? cfg.channels.whatsapp.defaultTo
-                  : undefined,
-            },
-          },
-          source: "test",
-        },
-        {
-          pluginId: "telegram",
-          plugin: {
-            ...createOutboundTestPlugin({
-              id: "telegram",
-              label: "Telegram",
-              outbound: telegramOutbound,
-              messaging: telegramMessaging,
-            }),
-            config: {
-              listAccountIds: () => [],
-              resolveDefaultTo: ({ cfg }: { cfg: OpenClawConfig }) =>
-                typeof cfg.channels?.telegram?.defaultTo === "string"
-                  ? cfg.channels.telegram.defaultTo
-                  : undefined,
-            },
-          },
-          source: "test",
-        },
-      ]),
+      createTargetsTestRegistry([createWhatsAppTestPlugin(), createTelegramTestPlugin()]),
     );
   });
 
   afterEach(() => {
-    setActivePluginRegistry(createTestRegistry());
+    setActivePluginRegistry(createTargetsTestRegistry([]));
   });
 }
 

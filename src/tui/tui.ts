@@ -16,6 +16,7 @@ import {
   normalizeMainKey,
   parseAgentSessionKey,
 } from "../routing/session-key.js";
+import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import { getSlashCommands } from "./commands.js";
 import { ChatLog } from "./components/chat-log.js";
 import { CustomEditor } from "./components/custom-editor.js";
@@ -69,9 +70,31 @@ export function resolveTuiSessionKey(params: {
     return trimmed;
   }
   if (trimmed.startsWith("agent:")) {
-    return trimmed.toLowerCase();
+    return normalizeLowercaseStringOrEmpty(trimmed);
   }
-  return `agent:${params.currentAgentId}:${trimmed.toLowerCase()}`;
+  return `agent:${params.currentAgentId}:${normalizeLowercaseStringOrEmpty(trimmed)}`;
+}
+
+export function resolveInitialTuiAgentId(params: {
+  cfg: OpenClawConfig;
+  fallbackAgentId: string;
+  initialSessionInput?: string;
+  cwd?: string;
+}) {
+  const parsed = parseAgentSessionKey((params.initialSessionInput ?? "").trim());
+  if (parsed?.agentId) {
+    return normalizeAgentId(parsed.agentId);
+  }
+
+  const inferredFromWorkspace = resolveAgentIdByWorkspacePath(
+    params.cfg,
+    params.cwd ?? process.cwd(),
+  );
+  if (inferredFromWorkspace) {
+    return inferredFromWorkspace;
+  }
+
+  return normalizeAgentId(params.fallbackAgentId);
 }
 
 export function resolveInitialTuiAgentId(params: {
@@ -158,6 +181,24 @@ export function stopTuiSafely(stop: () => void): void {
   }
 }
 
+type DrainableTui = {
+  stop: () => void;
+  terminal?: {
+    drainInput?: (maxMs?: number, idleMs?: number) => Promise<void>;
+  };
+};
+
+export async function drainAndStopTuiSafely(tui: DrainableTui): Promise<void> {
+  if (typeof tui.terminal?.drainInput === "function") {
+    try {
+      await tui.terminal.drainInput();
+    } catch {
+      // Best-effort only. A failed drain should not skip terminal shutdown.
+    }
+  }
+  stopTuiSafely(() => tui.stop());
+}
+
 type CtrlCAction = "clear" | "warn" | "exit";
 
 export function resolveCtrlCAction(params: {
@@ -203,6 +244,7 @@ export async function runTui(opts: TuiOptions) {
   let initialSessionApplied = false;
   let currentSessionId: string | null = null;
   let activeChatRunId: string | null = null;
+  let pendingOptimisticUserMessage = false;
   let historyLoaded = false;
   let isConnected = false;
   let wasDisconnected = false;
@@ -273,6 +315,12 @@ export async function runTui(opts: TuiOptions) {
     },
     set activeChatRunId(value) {
       activeChatRunId = value;
+    },
+    get pendingOptimisticUserMessage() {
+      return pendingOptimisticUserMessage;
+    },
+    set pendingOptimisticUserMessage(value) {
+      pendingOptimisticUserMessage = value;
     },
     get historyLoaded() {
       return historyLoaded;
@@ -712,6 +760,7 @@ export async function runTui(opts: TuiOptions) {
     setActivityStatus,
     refreshSessionInfo,
     loadHistory,
+    noteLocalRunId,
     isLocalRunId,
     forgetLocalRunId,
     clearLocalRunIds,
@@ -726,8 +775,9 @@ export async function runTui(opts: TuiOptions) {
     }
     exitRequested = true;
     client.stop();
-    stopTuiSafely(() => tui.stop());
-    process.exit(0);
+    void drainAndStopTuiSafely(tui).then(() => {
+      process.exit(0);
+    });
   };
 
   const { handleCommand, sendMessage, openModelSelector, openAgentSelector, openSessionSelector } =

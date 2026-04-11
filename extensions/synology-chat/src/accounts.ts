@@ -18,7 +18,39 @@ import type {
 
 /** Extract the channel config from the full OpenClaw config object. */
 function getChannelConfig(cfg: OpenClawConfig): SynologyChatChannelConfig | undefined {
-  return cfg?.channels?.["synology-chat"];
+  return cfg?.channels?.["synology-chat"] as SynologyChatChannelConfig | undefined;
+}
+
+function resolveImplicitAccountId(channelCfg: SynologyChatChannelConfig): string | undefined {
+  return channelCfg.token || process.env.SYNOLOGY_CHAT_TOKEN ? DEFAULT_ACCOUNT_ID : undefined;
+}
+
+function getRawAccountConfig(
+  channelCfg: SynologyChatChannelConfig,
+  accountId: string,
+): SynologyChatChannelConfig {
+  if (accountId === DEFAULT_ACCOUNT_ID) {
+    return channelCfg;
+  }
+  return channelCfg.accounts?.[accountId] ?? {};
+}
+
+function hasExplicitWebhookPath(rawAccount: SynologyChatChannelConfig | undefined): boolean {
+  return typeof rawAccount?.webhookPath === "string" && rawAccount.webhookPath.trim().length > 0;
+}
+
+function resolveWebhookPathSource(params: {
+  accountId: string;
+  channelCfg: SynologyChatChannelConfig;
+  rawAccount: SynologyChatChannelConfig;
+}): SynologyWebhookPathSource {
+  if (hasExplicitWebhookPath(params.rawAccount)) {
+    return "explicit";
+  }
+  if (params.accountId !== DEFAULT_ACCOUNT_ID && hasExplicitWebhookPath(params.channelCfg)) {
+    return "inherited-base";
+  }
+  return "default";
 }
 
 function resolveImplicitAccountId(channelCfg: SynologyChatChannelConfig): string | undefined {
@@ -55,8 +87,12 @@ function resolveWebhookPathSource(params: {
 
 /** Parse allowedUserIds from string or array to string[]. */
 function parseAllowedUserIds(raw: string | string[] | undefined): string[] {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (!raw) {
+    return [];
+  }
+  if (Array.isArray(raw)) {
+    return raw.filter(Boolean);
+  }
   return raw
     .split(",")
     .map((s) => s.trim())

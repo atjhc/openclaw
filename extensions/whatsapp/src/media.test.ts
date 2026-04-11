@@ -1,41 +1,20 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { optimizeImageToPng } from "openclaw/plugin-sdk/media-runtime";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
+import { captureEnv } from "openclaw/plugin-sdk/testing";
+import { mockPinnedHostnameResolution } from "openclaw/plugin-sdk/testing";
 import sharp from "sharp";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveStateDir } from "../../../src/config/paths.js";
-import { resolvePreferredOpenClawTmpDir } from "../../../src/infra/tmp-openclaw-dir.js";
-import { optimizeImageToPng } from "../../../src/media/image-ops.js";
-import { mockPinnedHostnameResolution } from "../../../src/test-helpers/ssrf.js";
-import { captureEnv } from "../../../test/helpers/extensions/env.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sendVoiceMessageDiscord } from "../../discord/src/send.js";
-
-let LocalMediaAccessError: typeof import("./media.js").LocalMediaAccessError;
-let loadWebMedia: typeof import("./media.js").loadWebMedia;
-let loadWebMediaRaw: typeof import("./media.js").loadWebMediaRaw;
-let optimizeImageToJpeg: typeof import("./media.js").optimizeImageToJpeg;
-
-const convertHeicToJpegMock = vi.fn();
-
-vi.mock("../../../src/media/image-ops.js", async () => {
-  const actual = await vi.importActual<typeof import("../../../src/media/image-ops.js")>(
-    "../../../src/media/image-ops.js",
-  );
-  return {
-    ...actual,
-    convertHeicToJpeg: (...args: unknown[]) => convertHeicToJpegMock(...args),
-  };
-});
-
-vi.mock("openclaw/plugin-sdk/media-runtime", async () => {
-  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/media-runtime")>(
-    "openclaw/plugin-sdk/media-runtime",
-  );
-  return {
-    ...actual,
-    convertHeicToJpeg: (...args: unknown[]) => convertHeicToJpegMock(...args),
-  };
-});
+import {
+  LocalMediaAccessError,
+  loadWebMedia,
+  loadWebMediaRaw,
+  optimizeImageToJpeg,
+} from "./media.js";
 
 let fixtureRoot = "";
 let fixtureFileCount = 0;

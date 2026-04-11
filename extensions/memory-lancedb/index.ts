@@ -10,6 +10,8 @@ import { randomUUID } from "node:crypto";
 import type * as LanceDB from "@lancedb/lancedb";
 import { Type } from "@sinclair/typebox";
 import OpenAI from "openai";
+import { ensureGlobalUndiciEnvProxyDispatcher } from "openclaw/plugin-sdk/runtime-env";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import { definePluginEntry, type OpenClawPluginApi } from "./api.js";
 import {
   DEFAULT_CAPTURE_MAX_CHARS,
@@ -37,6 +39,8 @@ type MemorySearchResult = {
   entry: MemoryEntry;
   score: number;
 };
+
+type LegacyBeforeAgentStartContext = { prependContext: string } | undefined;
 
 // ============================================================================
 // LanceDB Provider
@@ -168,6 +172,7 @@ class Embeddings {
     if (this.dimensions) {
       params.dimensions = this.dimensions;
     }
+    ensureGlobalUndiciEnvProxyDispatcher();
     const response = await this.client.embeddings.create(params);
     return response.data[0].embedding;
   }
@@ -257,7 +262,7 @@ export function shouldCapture(text: string, options?: { maxChars?: number }): bo
 }
 
 export function detectCategory(text: string): MemoryCategory {
-  const lower = text.toLowerCase();
+  const lower = normalizeLowercaseStringOrEmpty(text);
   if (/prefer|radši|like|love|hate|want/i.test(lower)) {
     return "preference";
   }
@@ -533,9 +538,9 @@ export default definePluginEntry({
 
     // Auto-recall: inject relevant memories before agent starts
     if (cfg.autoRecall) {
-      api.on("before_agent_start", async (event) => {
+      api.on("before_agent_start", async (event): Promise<LegacyBeforeAgentStartContext> => {
         if (!event.prompt || event.prompt.length < 5) {
-          return;
+          return undefined;
         }
 
         try {
@@ -543,7 +548,7 @@ export default definePluginEntry({
           const results = await db.search(vector, 3, 0.3);
 
           if (results.length === 0) {
-            return;
+            return undefined;
           }
 
           api.logger.info?.(`memory-lancedb: injecting ${results.length} memories into context`);
@@ -556,6 +561,7 @@ export default definePluginEntry({
         } catch (err) {
           api.logger.warn(`memory-lancedb: recall failed: ${String(err)}`);
         }
+        return undefined;
       });
     }
 

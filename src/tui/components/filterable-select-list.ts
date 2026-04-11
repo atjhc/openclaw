@@ -8,6 +8,7 @@ import {
   type SelectListTheme,
 } from "@mariozechner/pi-tui";
 import chalk from "chalk";
+import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import { fuzzyFilterLower, prepareSearchItems } from "./fuzzy-filter.js";
 
 export interface FilterableSelectItem extends SelectItem {
@@ -45,7 +46,7 @@ export class FilterableSelectList implements Component {
   }
 
   private applyFilter(): void {
-    const queryLower = this.filterText.toLowerCase();
+    const queryLower = normalizeLowercaseStringOrEmpty(this.filterText);
     if (!queryLower.trim()) {
       this.selectList = new SelectList(this.allItems, this.maxVisible, this.theme);
       return;
@@ -110,7 +111,7 @@ export class FilterableSelectList implements Component {
     }
 
     // Escape: clear filter or cancel
-    if (matchesKey(keyData, Key.escape) || matchesKey(keyData, Key.ctrl("c"))) {
+    if (matchesKey(keyData, "escape") || keyData === "\u0003") {
       if (this.filterText) {
         this.filterText = "";
         this.input.setValue("");

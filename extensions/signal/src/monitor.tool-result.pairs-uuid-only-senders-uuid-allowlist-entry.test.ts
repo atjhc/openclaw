@@ -8,7 +8,7 @@ import {
 } from "./monitor.tool-result.test-harness.js";
 
 installSignalToolResultTestHooks();
-let monitorSignalProvider: typeof import("./monitor.js").monitorSignalProvider;
+const { monitorSignalProvider } = await import("./monitor.js");
 
 const { replyMock, sendMock, streamMock, upsertPairingRequestMock } =
   getSignalToolResultTestMocks();

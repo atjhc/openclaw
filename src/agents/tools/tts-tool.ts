@@ -57,7 +57,8 @@ export function createTtsTool(opts?: {
   return {
     label: "TTS",
     name: "tts",
-    description: `Convert text to speech. After a successful call, you MUST deliver the audio by replying with:\n[[audio_as_voice]]\nMEDIA:<audioPath from result>\nTo add a caption, write it before the [[audio_as_voice]] line. Example with caption:\nGood morning!\n[[audio_as_voice]]\nMEDIA:/tmp/openclaw/tts/voice.mp3\nExample without caption:\n[[audio_as_voice]]\nMEDIA:/tmp/openclaw/tts/voice.mp3\nDo NOT reply with ${SILENT_REPLY_TOKEN} — always include the MEDIA directive.`,
+    displaySummary: "Convert text to speech and return audio.",
+    description: `Convert text to speech. Audio is delivered automatically from the tool result — reply with ${SILENT_REPLY_TOKEN} after a successful call to avoid duplicate messages.`,
     parameters: TtsToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -72,25 +73,15 @@ export function createTtsTool(opts?: {
       });
 
       if (result.success && result.audioPath) {
-        const resolvedAudioPath = await maybeApplyFilename(result.audioPath, filename);
-        // Return the audio path without a MEDIA: directive so
-        // extractToolResultMediaPaths won't match it and onToolResult won't
-        // eagerly deliver a captionless copy. The agent writes the MEDIA:
-        // directive in its own reply (per the tool description), paired with
-        // optional caption text, so delivery happens exactly once.
         return {
-          content: [
-            {
-              type: "text",
-              text: `Audio generated. Path: ${resolvedAudioPath}${result.voiceCompatible ? " (voice compatible)" : ""}`,
-            },
-          ],
+          content: [{ type: "text", text: "Generated audio reply." }],
           details: {
-            audioPath: resolvedAudioPath,
-            originalAudioPath: result.audioPath,
+            audioPath: result.audioPath,
             provider: result.provider,
-            filename: filename?.trim() || undefined,
-            voiceCompatible: result.voiceCompatible,
+            media: {
+              mediaUrl: result.audioPath,
+              ...(result.voiceCompatible ? { audioAsVoice: true } : {}),
+            },
           },
         };
       }

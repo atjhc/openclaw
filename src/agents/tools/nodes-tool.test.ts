@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const gatewayMocks = vi.hoisted(() => ({
   callGatewayTool: vi.fn(),
@@ -8,8 +8,21 @@ const gatewayMocks = vi.hoisted(() => ({
 const nodeUtilsMocks = vi.hoisted(() => ({
   resolveNodeId: vi.fn(async () => "node-1"),
   resolveNode: vi.fn(async () => ({ nodeId: "node-1", remoteIp: "127.0.0.1" })),
-  listNodes: vi.fn(async () => [] as Array<{ nodeId: string; commands?: string[] }>),
-  resolveNodeIdFromList: vi.fn(() => "node-1"),
+}));
+
+const nodesCameraMocks = vi.hoisted(() => ({
+  cameraTempPath: vi.fn(({ facing }: { facing?: string }) =>
+    facing ? `/tmp/camera-${facing}.jpg` : "/tmp/camera.jpg",
+  ),
+  parseCameraClipPayload: vi.fn(),
+  parseCameraSnapPayload: vi.fn(() => ({
+    base64: "ZmFrZQ==",
+    format: "jpg",
+    width: 800,
+    height: 600,
+  })),
+  writeCameraClipPayloadToFile: vi.fn(),
+  writeCameraPayloadToFile: vi.fn(async () => undefined),
 }));
 
 const nodesCameraMocks = vi.hoisted(() => ({
@@ -48,8 +61,14 @@ vi.mock("./gateway.js", () => ({
 vi.mock("./nodes-utils.js", () => ({
   resolveNodeId: nodeUtilsMocks.resolveNodeId,
   resolveNode: nodeUtilsMocks.resolveNode,
-  listNodes: nodeUtilsMocks.listNodes,
-  resolveNodeIdFromList: nodeUtilsMocks.resolveNodeIdFromList,
+}));
+
+vi.mock("../../cli/nodes-camera.js", () => ({
+  cameraTempPath: nodesCameraMocks.cameraTempPath,
+  parseCameraClipPayload: nodesCameraMocks.parseCameraClipPayload,
+  parseCameraSnapPayload: nodesCameraMocks.parseCameraSnapPayload,
+  writeCameraClipPayloadToFile: nodesCameraMocks.writeCameraClipPayloadToFile,
+  writeCameraPayloadToFile: nodesCameraMocks.writeCameraPayloadToFile,
 }));
 
 vi.mock("../../cli/nodes-camera.js", () => ({
@@ -66,9 +85,55 @@ vi.mock("../../cli/nodes-screen.js", () => ({
   writeScreenRecordToFile: screenMocks.writeScreenRecordToFile,
 }));
 
-import { createNodesTool } from "./nodes-tool.js";
+let createNodesTool: typeof import("./nodes-tool.js").createNodesTool;
+
+function mockNodePairApproveFlow(pendingRequest: {
+  requiredApproveScopes?: string[];
+  commands?: string[];
+}): void {
+  gatewayMocks.callGatewayTool.mockImplementation(async (method, _opts, params, extra) => {
+    if (method === "node.pair.list") {
+      return {
+        pending: [
+          {
+            requestId: "req-1",
+            ...pendingRequest,
+          },
+        ],
+      };
+    }
+    if (method === "node.pair.approve") {
+      return { ok: true, method, params, extra };
+    }
+    throw new Error(`unexpected method: ${String(method)}`);
+  });
+}
+
+function expectNodePairApproveScopes(scopes: string[]): void {
+  expect(gatewayMocks.callGatewayTool).toHaveBeenNthCalledWith(
+    1,
+    "node.pair.list",
+    {},
+    {},
+    { scopes: ["operator.pairing"] },
+  );
+  expect(gatewayMocks.callGatewayTool).toHaveBeenNthCalledWith(
+    2,
+    "node.pair.approve",
+    {},
+    { requestId: "req-1" },
+    { scopes },
+  );
+}
 
 describe("createNodesTool screen_record duration guardrails", () => {
+  beforeAll(async () => {
+    // The agents lane runs on the shared non-isolated runner, so clear any
+    // cached prior import before wiring this file's gateway/media mocks.
+    vi.resetModules();
+    ({ createNodesTool } = await import("./nodes-tool.js"));
+  });
+
   beforeEach(() => {
     gatewayMocks.callGatewayTool.mockReset();
     gatewayMocks.readGatewayCallOptions.mockReset();
@@ -120,50 +185,15 @@ describe("createNodesTool screen_record duration guardrails", () => {
     );
   });
 
-  it("omits rawCommand when preparing wrapped argv execution", async () => {
-    nodeUtilsMocks.listNodes.mockResolvedValue([
-      {
-        nodeId: "node-1",
-        commands: ["system.run"],
-      },
-    ]);
-    gatewayMocks.callGatewayTool.mockImplementation(async (_method, _opts, payload) => {
-      if (payload?.command === "system.run.prepare") {
-        return {
-          payload: {
-            plan: {
-              argv: ["bash", "-lc", "echo hi"],
-              cwd: null,
-              commandText: 'bash -lc "echo hi"',
-              commandPreview: "echo hi",
-              agentId: null,
-              sessionKey: null,
-            },
-          },
-        };
-      }
-      if (payload?.command === "system.run") {
-        return { payload: { ok: true } };
-      }
-      throw new Error(`unexpected command: ${String(payload?.command)}`);
-    });
+  it("rejects the removed run action", async () => {
     const tool = createNodesTool();
 
-    await tool.execute("call-1", {
-      action: "run",
-      node: "macbook",
-      command: ["bash", "-lc", "echo hi"],
-    });
-
-    const prepareCall = gatewayMocks.callGatewayTool.mock.calls.find(
-      (call) => call[2]?.command === "system.run.prepare",
-    )?.[2];
-    expect(prepareCall).toBeTruthy();
-    expect(prepareCall?.params).toMatchObject({
-      command: ["bash", "-lc", "echo hi"],
-      agentId: "main",
-    });
-    expect(prepareCall?.params).not.toHaveProperty("rawCommand");
+    await expect(
+      tool.execute("call-1", {
+        action: "run",
+        node: "macbook",
+      }),
+    ).rejects.toThrow("Unknown action: run");
   });
   it("returns camera snaps via details.media.mediaUrls", async () => {
     gatewayMocks.callGatewayTool.mockResolvedValue({ payload: { ok: true } });
@@ -244,5 +274,73 @@ describe("createNodesTool screen_record duration guardrails", () => {
       },
     });
     expect(JSON.stringify(result?.content ?? [])).not.toContain("MEDIA:");
+  });
+
+  it("uses operator.pairing plus operator.admin to approve exec-capable node pair requests", async () => {
+    mockNodePairApproveFlow({
+      requiredApproveScopes: ["operator.pairing", "operator.admin"],
+    });
+    const tool = createNodesTool();
+
+    await tool.execute("call-1", {
+      action: "approve",
+      requestId: "req-1",
+    });
+
+    expectNodePairApproveScopes(["operator.pairing", "operator.admin"]);
+  });
+
+  it("uses operator.pairing plus operator.write to approve non-exec node pair requests", async () => {
+    mockNodePairApproveFlow({
+      requiredApproveScopes: ["operator.pairing", "operator.write"],
+    });
+    const tool = createNodesTool();
+
+    await tool.execute("call-1", {
+      action: "approve",
+      requestId: "req-1",
+    });
+
+    expectNodePairApproveScopes(["operator.pairing", "operator.write"]);
+  });
+
+  it("uses operator.pairing for commandless node pair requests", async () => {
+    mockNodePairApproveFlow({
+      requiredApproveScopes: ["operator.pairing"],
+    });
+    const tool = createNodesTool();
+
+    await tool.execute("call-1", {
+      action: "approve",
+      requestId: "req-1",
+    });
+
+    expectNodePairApproveScopes(["operator.pairing"]);
+  });
+
+  it("falls back to command inspection when the gateway does not advertise required scopes", async () => {
+    mockNodePairApproveFlow({
+      commands: ["canvas.snapshot"],
+    });
+    const tool = createNodesTool();
+
+    await tool.execute("call-1", {
+      action: "approve",
+      requestId: "req-1",
+    });
+
+    expectNodePairApproveScopes(["operator.pairing", "operator.write"]);
+  });
+
+  it("blocks invokeCommand system.run so exec stays the only shell path", async () => {
+    const tool = createNodesTool();
+
+    await expect(
+      tool.execute("call-1", {
+        action: "invoke",
+        node: "macbook",
+        invokeCommand: "system.run",
+      }),
+    ).rejects.toThrow('invokeCommand "system.run" is reserved for shell execution');
   });
 });
