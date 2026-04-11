@@ -18,8 +18,10 @@ import {
 import { buildChannelAccountBindings, resolvePreferredAccountId } from "../routing/bindings.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
+import { asNullableRecord } from "../shared/record-coerce.js";
 import { styleHealthChannelLine } from "../terminal/health-style.js";
 import { isRich } from "../terminal/theme.js";
+import { logGatewayConnectionDetails } from "./status.gateway-connection.js";
 
 export type ChannelAccountHealthSummary = {
   accountId: string;
@@ -162,8 +164,83 @@ const buildSessionSummary = (storePath: string) => {
   } satisfies HealthSummary["sessions"];
 };
 
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+async function inspectHealthAccount(plugin: ChannelPlugin, cfg: OpenClawConfig, accountId: string) {
+  return (
+    plugin.config.inspectAccount?.(cfg, accountId) ??
+    (await inspectReadOnlyChannelAccount({
+      channelId: plugin.id,
+      cfg,
+      accountId,
+    }))
+  );
+}
+
+function readBooleanField(value: unknown, key: string): boolean | undefined {
+  const record = asNullableRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  return typeof record[key] === "boolean" ? record[key] : undefined;
+}
+
+async function resolveHealthAccountContext(params: {
+  plugin: ChannelPlugin;
+  cfg: OpenClawConfig;
+  accountId: string;
+}): Promise<{
+  account: unknown;
+  enabled: boolean;
+  configured: boolean;
+  diagnostics: string[];
+}> {
+  const diagnostics: string[] = [];
+  let account: unknown;
+  try {
+    account = params.plugin.config.resolveAccount(params.cfg, params.accountId);
+  } catch (error) {
+    diagnostics.push(
+      `${params.plugin.id}:${params.accountId}: failed to resolve account (${formatErrorMessage(error)}).`,
+    );
+    account = await inspectHealthAccount(params.plugin, params.cfg, params.accountId);
+  }
+
+  if (!account) {
+    return {
+      account: {},
+      enabled: false,
+      configured: false,
+      diagnostics,
+    };
+  }
+
+  const enabledFallback = readBooleanField(account, "enabled") ?? true;
+  let enabled = enabledFallback;
+  if (params.plugin.config.isEnabled) {
+    try {
+      enabled = params.plugin.config.isEnabled(account, params.cfg);
+    } catch (error) {
+      enabled = enabledFallback;
+      diagnostics.push(
+        `${params.plugin.id}:${params.accountId}: failed to evaluate enabled state (${formatErrorMessage(error)}).`,
+      );
+    }
+  }
+
+  const configuredFallback = readBooleanField(account, "configured") ?? true;
+  let configured = configuredFallback;
+  if (params.plugin.config.isConfigured) {
+    try {
+      configured = await params.plugin.config.isConfigured(account, params.cfg);
+    } catch (error) {
+      configured = configuredFallback;
+      diagnostics.push(
+        `${params.plugin.id}:${params.accountId}: failed to evaluate configured state (${formatErrorMessage(error)}).`,
+      );
+    }
+  }
+
+  return { account, enabled, configured, diagnostics };
+}
 
 async function inspectHealthAccount(plugin: ChannelPlugin, cfg: OpenClawConfig, accountId: string) {
   return (
@@ -244,7 +321,7 @@ async function resolveHealthAccountContext(params: {
 }
 
 const formatProbeLine = (probe: unknown, opts: { botUsernames?: string[] } = {}): string | null => {
-  const record = asRecord(probe);
+  const record = asNullableRecord(probe);
   if (!record) {
     return null;
   }
@@ -255,9 +332,9 @@ const formatProbeLine = (probe: unknown, opts: { botUsernames?: string[] } = {})
   const elapsedMs = typeof record.elapsedMs === "number" ? record.elapsedMs : null;
   const status = typeof record.status === "number" ? record.status : null;
   const error = typeof record.error === "string" ? record.error : null;
-  const bot = asRecord(record.bot);
+  const bot = asNullableRecord(record.bot);
   const botUsername = bot && typeof bot.username === "string" ? bot.username : null;
-  const webhook = asRecord(record.webhook);
+  const webhook = asNullableRecord(record.webhook);
   const webhookUrl = webhook && typeof webhook.url === "string" ? webhook.url : null;
 
   const usernames = new Set<string>();
@@ -291,7 +368,7 @@ const formatProbeLine = (probe: unknown, opts: { botUsernames?: string[] } = {})
 };
 
 const formatAccountProbeTiming = (summary: ChannelAccountHealthSummary): string | null => {
-  const probe = asRecord(summary.probe);
+  const probe = asNullableRecord(summary.probe);
   if (!probe) {
     return null;
   }
@@ -302,7 +379,7 @@ const formatAccountProbeTiming = (summary: ChannelAccountHealthSummary): string 
   }
 
   const accountId = summary.accountId || "default";
-  const botRecord = asRecord(probe.bot);
+  const botRecord = asNullableRecord(probe.bot);
   const botUsername =
     botRecord && typeof botRecord.username === "string" ? botRecord.username : null;
   const handle = botUsername ? `@${botUsername}` : accountId;
@@ -312,7 +389,7 @@ const formatAccountProbeTiming = (summary: ChannelAccountHealthSummary): string 
 };
 
 const isProbeFailure = (summary: ChannelAccountHealthSummary): boolean => {
-  const probe = asRecord(summary.probe);
+  const probe = asNullableRecord(summary.probe);
   if (!probe) {
     return false;
   }
@@ -357,8 +434,8 @@ export const formatHealthChannelLines = (
     const botUsernames = listSummaries
       ? listSummaries
           .map((account) => {
-            const probeRecord = asRecord(account.probe);
-            const bot = probeRecord ? asRecord(probeRecord.bot) : null;
+            const probeRecord = asNullableRecord(account.probe);
+            const bot = probeRecord ? asNullableRecord(probeRecord.bot) : null;
             return bot && typeof bot.username === "string" ? bot.username : null;
           })
           .filter((value): value is string => Boolean(value))
@@ -624,10 +701,11 @@ export async function healthCommand(
     const rich = isRich();
     if (opts.verbose) {
       const details = buildGatewayConnectionDetails({ config: cfg });
-      runtime.log(info("Gateway connection:"));
-      for (const line of details.message.split("\n")) {
-        runtime.log(`  ${line}`);
-      }
+      logGatewayConnectionDetails({
+        runtime,
+        info,
+        message: details.message,
+      });
     }
     const localAgents = resolveAgentOrder(cfg);
     const defaultAgentId = summary.defaultAgentId ?? localAgents.defaultAgentId;
@@ -665,7 +743,7 @@ export async function healthCommand(
             cfg,
             accountId,
           });
-          const record = asRecord(account);
+          const record = asNullableRecord(account);
           const tokenSource =
             record && typeof record.tokenSource === "string" ? record.tokenSource : undefined;
           runtime.log(
@@ -687,8 +765,8 @@ export async function healthCommand(
       for (const [channelId, channelSummary] of Object.entries(summary.channels ?? {})) {
         const accounts = channelSummary.accounts ?? {};
         const probes = Object.entries(accounts).map(([accountId, accountSummary]) => {
-          const probe = asRecord(accountSummary.probe);
-          const bot = probe ? asRecord(probe.bot) : null;
+          const probe = asNullableRecord(accountSummary.probe);
+          const bot = probe ? asNullableRecord(probe.bot) : null;
           const username = bot && typeof bot.username === "string" ? bot.username : null;
           return `${accountId}=${username ?? "(no bot)"}`;
         });

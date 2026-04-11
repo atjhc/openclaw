@@ -9,7 +9,40 @@ import {
 import { formatError } from "../../session.js";
 import { whatsappInboundLog } from "../loggers.js";
 import type { WebInboundMsg } from "../types.js";
-import type { GroupHistoryEntry } from "./process-message.js";
+import type { GroupHistoryEntry } from "./inbound-context.js";
+
+function buildBroadcastRouteKeys(params: {
+  cfg: ReturnType<typeof loadConfig>;
+  msg: WebInboundMsg;
+  route: ReturnType<typeof resolveAgentRoute>;
+  peerId: string;
+  agentId: string;
+}) {
+  const sessionKey = buildAgentSessionKey({
+    agentId: params.agentId,
+    channel: "whatsapp",
+    accountId: params.route.accountId,
+    peer: {
+      kind: params.msg.chatType === "group" ? "group" : "direct",
+      id: params.peerId,
+    },
+    dmScope: params.cfg.session?.dmScope,
+    identityLinks: params.cfg.session?.identityLinks,
+  });
+  const mainSessionKey = buildAgentMainSessionKey({
+    agentId: params.agentId,
+    mainKey: DEFAULT_MAIN_KEY,
+  });
+
+  return {
+    sessionKey,
+    mainSessionKey,
+    lastRoutePolicy: deriveLastRoutePolicy({
+      sessionKey,
+      mainSessionKey,
+    }),
+  };
+}
 
 function buildBroadcastRouteKeys(params: {
   cfg: ReturnType<typeof loadConfig>;

@@ -9,6 +9,7 @@ import {
   resolveAgentDir,
   resolveAgentEffectiveModelPrimary,
   resolveAgentExplicitModelPrimary,
+  resolveAgentSkillsFilter,
   resolveFallbackAgentId,
   resolveEffectiveModelFallbacks,
   resolveAgentModelFallbacksOverride,
@@ -66,6 +67,23 @@ describe("resolveAgentConfig", () => {
       sandbox: undefined,
       tools: undefined,
     });
+  });
+
+  it("prefers per-agent verbose defaults over global defaults", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          verboseDefault: "full",
+        },
+        list: [
+          {
+            id: "main",
+            verboseDefault: "on",
+          },
+        ],
+      },
+    };
+    expect(resolveAgentConfig(cfg, "main")?.verboseDefault).toBe("on");
   });
 
   it("resolves explicit and effective model primary separately", () => {
@@ -321,7 +339,7 @@ describe("resolveAgentConfig", () => {
   });
 
   it("should return agent-specific sandbox config", () => {
-    const cfg: OpenClawConfig = {
+    const cfg = {
       agents: {
         list: [
           {
@@ -337,7 +355,7 @@ describe("resolveAgentConfig", () => {
           },
         ],
       },
-    };
+    } as unknown as OpenClawConfig;
     const result = resolveAgentConfig(cfg, "work");
     expect(result?.sandbox).toEqual({
       mode: "all",
@@ -430,6 +448,170 @@ describe("resolveAgentConfig", () => {
 
     const agentDir = resolveAgentDir({} as OpenClawConfig, "main");
     expect(agentDir).toBe(path.join(path.resolve(home), ".openclaw", "agents", "main", "agent"));
+  });
+
+  it("non-default agent uses agents.defaults.workspace as base (#59789)", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: { workspace: "/shared-ws" },
+        list: [{ id: "main" }, { id: "work", default: true, workspace: "/work-ws" }],
+      },
+    };
+    const workspace = resolveAgentWorkspaceDir(cfg, "main");
+    expect(workspace).toBe(path.resolve("/shared-ws/main"));
+  });
+
+  it("default agent without per-agent workspace uses agents.defaults.workspace directly", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: { workspace: "/shared-ws" },
+        list: [{ id: "main" }, { id: "work", default: true }],
+      },
+    };
+    const workspace = resolveAgentWorkspaceDir(cfg, "work");
+    expect(workspace).toBe(path.resolve("/shared-ws"));
+  });
+
+  it("non-default agent without defaults.workspace falls back to stateDir", () => {
+    const stateDir = path.join(path.sep, "tmp", "test-state");
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+    const cfg: OpenClawConfig = {
+      agents: {
+        list: [{ id: "main" }, { id: "work", default: true, workspace: "/work-ws" }],
+      },
+    };
+    const workspace = resolveAgentWorkspaceDir(cfg, "main");
+    expect(workspace).toBe(path.join(stateDir, "workspace-main"));
+  });
+});
+
+describe("resolveAgentIdByWorkspacePath", () => {
+  it("returns the most specific workspace match for a directory", () => {
+    const workspaceRoot = `/tmp/openclaw-agent-scope-${Date.now()}-root`;
+    const opsWorkspace = `${workspaceRoot}/projects/ops`;
+    const cfg: OpenClawConfig = {
+      agents: {
+        list: [
+          { id: "main", workspace: workspaceRoot },
+          { id: "ops", workspace: opsWorkspace },
+        ],
+      },
+    };
+
+    expect(resolveAgentIdByWorkspacePath(cfg, `${opsWorkspace}/src`)).toBe("ops");
+  });
+
+  it("returns undefined when directory has no matching workspace", () => {
+    const workspaceRoot = `/tmp/openclaw-agent-scope-${Date.now()}-root`;
+    const cfg: OpenClawConfig = {
+      agents: {
+        list: [
+          { id: "main", workspace: workspaceRoot },
+          { id: "ops", workspace: `${workspaceRoot}-ops` },
+        ],
+      },
+    };
+
+    expect(
+      resolveAgentIdByWorkspacePath(cfg, `/tmp/openclaw-agent-scope-${Date.now()}-unrelated`),
+    ).toBeUndefined();
+  });
+
+  it("matches workspace paths through symlink aliases", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-scope-"));
+    const realWorkspaceRoot = path.join(tempRoot, "real-root");
+    const realOpsWorkspace = path.join(realWorkspaceRoot, "projects", "ops");
+    const aliasWorkspaceRoot = path.join(tempRoot, "alias-root");
+    try {
+      fs.mkdirSync(path.join(realOpsWorkspace, "src"), { recursive: true });
+      fs.symlinkSync(
+        realWorkspaceRoot,
+        aliasWorkspaceRoot,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      const cfg: OpenClawConfig = {
+        agents: {
+          list: [
+            { id: "main", workspace: realWorkspaceRoot },
+            { id: "ops", workspace: realOpsWorkspace },
+          ],
+        },
+      };
+
+      expect(
+        resolveAgentIdByWorkspacePath(cfg, path.join(aliasWorkspaceRoot, "projects", "ops")),
+      ).toBe("ops");
+      expect(
+        resolveAgentIdByWorkspacePath(cfg, path.join(aliasWorkspaceRoot, "projects", "ops", "src")),
+      ).toBe("ops");
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveAgentIdsByWorkspacePath", () => {
+  it("returns matching workspaces ordered by specificity", () => {
+    const workspaceRoot = `/tmp/openclaw-agent-scope-${Date.now()}-root`;
+    const opsWorkspace = `${workspaceRoot}/projects/ops`;
+    const opsDevWorkspace = `${opsWorkspace}/dev`;
+    const cfg: OpenClawConfig = {
+      agents: {
+        list: [
+          { id: "main", workspace: workspaceRoot },
+          { id: "ops", workspace: opsWorkspace },
+          { id: "ops-dev", workspace: opsDevWorkspace },
+        ],
+      },
+    };
+
+    expect(resolveAgentIdsByWorkspacePath(cfg, `${opsDevWorkspace}/pkg`)).toEqual([
+      "ops-dev",
+      "ops",
+      "main",
+    ]);
+  });
+});
+
+describe("resolveAgentSkillsFilter", () => {
+  it("inherits agents.defaults.skills when the agent omits skills", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          skills: ["github", "weather"],
+        },
+        list: [{ id: "writer" }],
+      },
+    };
+
+    expect(resolveAgentSkillsFilter(cfg, "writer")).toEqual(["github", "weather"]);
+  });
+
+  it("uses agents.list[].skills as a full replacement", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          skills: ["github", "weather"],
+        },
+        list: [{ id: "writer", skills: ["docs-search"] }],
+      },
+    };
+
+    expect(resolveAgentSkillsFilter(cfg, "writer")).toEqual(["docs-search"]);
+  });
+
+  it("keeps explicit empty agent skills as no skills", () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          skills: ["github", "weather"],
+        },
+        list: [{ id: "writer", skills: [] }],
+      },
+    };
+
+    expect(resolveAgentSkillsFilter(cfg, "writer")).toEqual([]);
   });
 });
 

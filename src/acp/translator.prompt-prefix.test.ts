@@ -83,7 +83,7 @@ describe("acp prompt cwd prefix", () => {
       expect.objectContaining({
         message: expect.stringMatching(/\[Working directory: ~[\\/]openclaw-test\]/),
       }),
-      { expectFinal: true },
+      { timeoutMs: null },
     );
   });
 
@@ -94,7 +94,114 @@ describe("acp prompt cwd prefix", () => {
       expect.objectContaining({
         message: expect.stringContaining("[Working directory: ~\\openclaw-test]"),
       }),
-      { expectFinal: true },
+      { timeoutMs: null },
+    );
+  });
+
+  it("injects system provenance metadata when enabled", async () => {
+    const requestSpy = await runPromptAndCaptureRequest({ provenanceMode: "meta" });
+    expect(requestSpy).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        systemInputProvenance: {
+          kind: "external_user",
+          originSessionId: TEST_SESSION_ID,
+          sourceChannel: "acp",
+          sourceTool: "openclaw_acp",
+        },
+        systemProvenanceReceipt: undefined,
+      }),
+      { timeoutMs: null },
+    );
+  });
+
+  it("injects a system provenance receipt when requested", async () => {
+    const requestSpy = await runPromptAndCaptureRequest({ provenanceMode: "meta+receipt" });
+    expect(requestSpy).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        systemInputProvenance: {
+          kind: "external_user",
+          originSessionId: TEST_SESSION_ID,
+          sourceChannel: "acp",
+          sourceTool: "openclaw_acp",
+        },
+        systemProvenanceReceipt: expect.stringContaining("[Source Receipt]"),
+      }),
+      { timeoutMs: null },
+    );
+    expect(requestSpy).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        systemProvenanceReceipt: expect.stringContaining("bridge=openclaw-acp"),
+      }),
+      { timeoutMs: null },
+    );
+    expect(requestSpy).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        systemProvenanceReceipt: expect.stringContaining(`originSessionId=${TEST_SESSION_ID}`),
+      }),
+      { timeoutMs: null },
+    );
+    expect(requestSpy).toHaveBeenCalledWith(
+      "chat.send",
+      expect.objectContaining({
+        systemProvenanceReceipt: expect.stringContaining(`targetSession=${TEST_SESSION_KEY}`),
+      }),
+      { timeoutMs: null },
+    );
+  });
+
+  it("retries without provenance when the gateway rejects admin-only provenance fields", async () => {
+    const requestSpy = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("system provenance fields require admin scope"), {
+          name: "GatewayClientRequestError",
+          gatewayCode: "INVALID_REQUEST",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("stop-after-send"));
+    const sessionStore = createInMemorySessionStore();
+    sessionStore.createSession({
+      sessionId: TEST_SESSION_ID,
+      sessionKey: TEST_SESSION_KEY,
+      cwd: path.join(os.homedir(), "openclaw-test"),
+    });
+    const agent = new AcpGatewayAgent(
+      createAcpConnection(),
+      createAcpGateway(requestSpy as unknown as GatewayClient["request"]),
+      {
+        sessionStore,
+        provenanceMode: "meta+receipt",
+      },
+    );
+
+    await expect(agent.prompt(TEST_PROMPT)).rejects.toThrow("stop-after-send");
+    expect(requestSpy).toHaveBeenCalledTimes(2);
+    expect(requestSpy).toHaveBeenNthCalledWith(
+      1,
+      "chat.send",
+      expect.objectContaining({
+        systemInputProvenance: {
+          kind: "external_user",
+          originSessionId: TEST_SESSION_ID,
+          sourceChannel: "acp",
+          sourceTool: "openclaw_acp",
+        },
+        systemProvenanceReceipt: expect.stringContaining("[Source Receipt]"),
+      }),
+      { timeoutMs: null },
+    );
+    expect(requestSpy).toHaveBeenNthCalledWith(
+      2,
+      "chat.send",
+      expect.not.objectContaining({
+        systemInputProvenance: expect.anything(),
+        systemProvenanceReceipt: expect.anything(),
+      }),
+      { timeoutMs: null },
     );
   });
 

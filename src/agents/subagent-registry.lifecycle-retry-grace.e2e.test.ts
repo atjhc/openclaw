@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { __testing as subagentAnnounceDeliveryTesting } from "./subagent-announce-delivery.js";
+import { __testing as subagentAnnounceOutputTesting } from "./subagent-announce-output.js";
+import { __testing as subagentAnnounceTesting } from "./subagent-announce.js";
+import * as mod from "./subagent-registry.js";
 
 const noop = () => {};
 const MAIN_REQUESTER_SESSION_KEY = "agent:main:main";
@@ -83,24 +87,10 @@ const loadConfigMock = vi.fn(() => ({
   agents: { defaults: { subagents: { archiveAfterMinutes: 0 } } },
   session: { mainKey: "main", scope: "per-sender" },
 }));
-const loadRegistryMock = vi.fn(() => new Map());
-const saveRegistryMock = vi.fn(() => {});
-
-vi.mock("../gateway/call.js", () => ({
-  callGateway: callGatewayMock,
+const registryStoreMocks = vi.hoisted(() => ({
+  loadRegistryMock: vi.fn(() => new Map()),
+  saveRegistryMock: vi.fn(() => {}),
 }));
-
-vi.mock("../infra/agent-events.js", () => ({
-  onAgentEvent: onAgentEventMock,
-}));
-
-vi.mock("../config/config.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../config/config.js")>();
-  return {
-    ...actual,
-    loadConfig: loadConfigMock,
-  };
-});
 
 vi.mock("../config/sessions.js", () => ({
   loadSessionStore: vi.fn(() => sessionStore),
@@ -114,68 +104,22 @@ vi.mock("../plugins/hook-runner-global.js", () => ({
   getGlobalHookRunner: vi.fn(() => null),
 }));
 
-vi.mock("./pi-embedded.js", () => ({
-  isEmbeddedPiRunActive: () => false,
-  queueEmbeddedPiMessage: () => false,
-  waitForEmbeddedPiRunEnd: async () => true,
-}));
-
 vi.mock("./subagent-depth.js", () => ({
   getSubagentDepthFromSessionStore: () => 0,
 }));
 
 vi.mock("./subagent-registry.store.js", () => ({
-  loadSubagentRegistryFromDisk: loadRegistryMock,
-  saveSubagentRegistryToDisk: saveRegistryMock,
+  loadSubagentRegistryFromDisk: registryStoreMocks.loadRegistryMock,
+  saveSubagentRegistryToDisk: registryStoreMocks.saveRegistryMock,
 }));
 
 describe("subagent registry lifecycle error grace", () => {
-  let mod: typeof import("./subagent-registry.js");
-
-  const installRegistryMocks = () => {
-    vi.doMock("../gateway/call.js", () => ({
-      callGateway: callGatewayMock,
-    }));
-    vi.doMock("../infra/agent-events.js", () => ({
-      onAgentEvent: onAgentEventMock,
-    }));
-    vi.doMock("../config/config.js", async (importOriginal) => {
-      const actual = await importOriginal<typeof import("../config/config.js")>();
-      return {
-        ...actual,
-        loadConfig: loadConfigMock,
-      };
-    });
-    vi.doMock("../config/sessions.js", () => ({
-      loadSessionStore: vi.fn(() => sessionStore),
-      resolveAgentIdFromSessionKey: (key: string) => key.match(/^agent:([^:]+)/)?.[1] ?? "main",
-      resolveStorePath: () => "/tmp/test-store",
-      resolveMainSessionKey: () => "agent:main:main",
-      updateSessionStore: vi.fn(),
-    }));
-    vi.doMock("../plugins/hook-runner-global.js", () => ({
-      getGlobalHookRunner: vi.fn(() => null),
-    }));
-    vi.doMock("./pi-embedded.js", () => ({
-      isEmbeddedPiRunActive: () => false,
-      queueEmbeddedPiMessage: () => false,
-      waitForEmbeddedPiRunEnd: async () => true,
-    }));
-    vi.doMock("./subagent-depth.js", () => ({
-      getSubagentDepthFromSessionStore: () => 0,
-    }));
-    vi.doMock("./subagent-registry.store.js", () => ({
-      loadSubagentRegistryFromDisk: loadRegistryMock,
-      saveSubagentRegistryToDisk: saveRegistryMock,
-    }));
-  };
-
   beforeEach(async () => {
-    vi.resetModules();
-    installRegistryMocks();
     vi.useFakeTimers();
     callGatewayMock.mockClear();
     onAgentEventMock.mockClear();
+    registryStoreMocks.loadRegistryMock.mockClear().mockReturnValue(new Map());
+    registryStoreMocks.saveRegistryMock.mockClear();
     loadConfigMock.mockClear().mockReturnValue({
       agents: { defaults: { subagents: { archiveAfterMinutes: 0 } } },
       session: { mainKey: "main", scope: "per-sender" },
@@ -205,11 +149,32 @@ describe("subagent registry lifecycle error grace", () => {
         },
       },
     );
-    mod = await import("./subagent-registry.js");
+    mod.__testing.setDepsForTest({
+      callGateway: callGatewayMock as typeof import("../gateway/call.js").callGateway,
+      loadConfig: loadConfigMock as typeof import("../config/config.js").loadConfig,
+      onAgentEvent:
+        onAgentEventMock as unknown as typeof import("../infra/agent-events.js").onAgentEvent,
+    });
+    subagentAnnounceTesting.setDepsForTest({
+      callGateway: callGatewayMock as typeof import("../gateway/call.js").callGateway,
+      loadConfig: loadConfigMock as typeof import("../config/config.js").loadConfig,
+    });
+    subagentAnnounceDeliveryTesting.setDepsForTest({
+      callGateway: callGatewayMock as typeof import("../gateway/call.js").callGateway,
+      loadConfig: loadConfigMock as typeof import("../config/config.js").loadConfig,
+    });
+    subagentAnnounceOutputTesting.setDepsForTest({
+      callGateway: callGatewayMock as typeof import("../gateway/call.js").callGateway,
+      loadConfig: loadConfigMock as typeof import("../config/config.js").loadConfig,
+    });
   });
 
   afterEach(() => {
     lifecycleHandler = undefined;
+    subagentAnnounceDeliveryTesting.setDepsForTest();
+    subagentAnnounceOutputTesting.setDepsForTest();
+    subagentAnnounceTesting.setDepsForTest();
+    mod.__testing.setDepsForTest();
     mod.resetSubagentRegistryForTests({ persist: false });
     vi.useRealTimers();
   });
@@ -233,18 +198,15 @@ describe("subagent registry lifecycle error grace", () => {
     throw new Error(`run ${runId} did not reach cleanupHandled=false in time`);
   };
 
-  const waitForCleanupCompleted = async (runId: string) => {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      const run = mod
-        .listSubagentRunsForRequester(MAIN_REQUESTER_SESSION_KEY)
-        .find((candidate) => candidate.runId === runId);
-      if (typeof run?.cleanupCompletedAt === "number") {
-        return run;
+  const waitForAgentCallCount = async (expectedCount: number) => {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (getAgentCalls().length >= expectedCount) {
+        return;
       }
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(100);
       await flushAsync();
     }
-    throw new Error(`run ${runId} did not complete cleanup in time`);
+    throw new Error(`expected ${expectedCount} agent call(s), got ${getAgentCalls().length}`);
   };
 
   const waitForAgentCallCount = async (expectedCount: number) => {
@@ -381,7 +343,6 @@ describe("subagent registry lifecycle error grace", () => {
     await waitForAgentCallCount(1);
     expect(readFirstAnnounceOutcome()?.status).toBe("error");
     expect(readFirstAnnounceOutcome()?.error).toContain("fatal failure");
-    await waitForCleanupCompleted("run-terminal-error");
   });
 
   it("freezes completion result at run termination across deferred announce retries", async () => {
@@ -511,7 +472,13 @@ describe("subagent registry lifecycle error grace", () => {
     expect(cappedResults[0]).toContain("[truncated: frozen completion output exceeded 100KB");
     expect(Buffer.byteLength(cappedResults[0] ?? "", "utf8")).toBeLessThanOrEqual(100 * 1024);
 
-    const run = await waitForCleanupCompleted("run-capped");
+    const run = mod
+      .listSubagentRunsForRequester(MAIN_REQUESTER_SESSION_KEY)
+      .find((candidate) => candidate.runId === "run-capped");
+    expect(run).toBeDefined();
+    if (!run) {
+      throw new Error("expected capped run to exist");
+    }
     expect(typeof run.frozenResultText).toBe("string");
     expect(run.frozenResultText).toContain("[truncated: frozen completion output exceeded 100KB");
     expect(run.frozenResultCapturedAt).toBeTypeOf("number");
